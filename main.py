@@ -33,34 +33,45 @@ def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[
     test_pairs = [(np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8)) for p in data.get('test', [])]
     return train_pairs, test_pairs
 
-def apply_with_augmentations(code_str: str, test_in: np.ndarray, dsl_context: dict) -> Optional[np.ndarray]:
-    """Test Time Augmentation (TTA) for geometric tasks (rotations/flips)."""
+def apply_with_augmentations(code_str: str, test_in: np.ndarray, train_pairs: List[Tuple[np.ndarray, np.ndarray]], dsl_context: dict) -> Optional[np.ndarray]:
+    """Test Time Augmentation (TTA): select best geometric transformation strictly based on training pairs score."""
     augmentations = [
-        lambda g: g.copy(),
-        lambda g: primitives.rotate_90(g),
-        lambda g: primitives.rotate_90(primitives.rotate_90(g)),
-        lambda g: primitives.rotate_90(primitives.rotate_90(primitives.rotate_90(g))),
-        lambda g: primitives.flip_h(g),
-        lambda g: primitives.flip_v(g),
+        ("identity", lambda g: g.copy()),
+        ("rot90", lambda g: primitives.rotate_90(g)),
+        ("rot180", lambda g: primitives.rotate_90(primitives.rotate_90(g))),
+        ("rot270", lambda g: primitives.rotate_90(primitives.rotate_90(primitives.rotate_90(g)))),
+        ("flip_h", lambda g: primitives.flip_h(g)),
+        ("flip_v", lambda g: primitives.flip_v(g)),
     ]
     
-    results = []
-    for aug in augmentations:
+    best_aug_func = augmentations[0][1]
+    best_score = -1.0
+
+    # Evaluate augmentations strictly on TRAINING pairs to prevent test-data leakage
+    for name, aug_func in augmentations:
+        score = 0.0
         try:
-            # Apply augmentation to input
-            aug_in = aug(test_in.copy())
-            pred, err = safe_execute_solve(code_str, aug_in, dsl_context, timeout_secs=5)
-            if err is None and pred is not None:
-                results.append(pred)
+            for inp, out in train_pairs:
+                aug_in = aug_func(inp.copy())
+                pred, err = safe_execute_solve(code_str, aug_in, dsl_context, timeout_secs=2)
+                if err is None and pred is not None and np.array_equal(pred, out):
+                    score += 1.0
+            score /= len(train_pairs)
+            if score > best_score:
+                best_score = score
+                best_aug_func = aug_func
+                if score == 1.0:
+                    break
         except Exception:
             continue
-            
-    if not results:
-        # Fallback to standard execution without TTA
+
+    try:
+        best_test_in = best_aug_func(test_in.copy())
+        pred, err = safe_execute_solve(code_str, best_test_in, dsl_context, timeout_secs=10)
+        return pred if err is None else None
+    except Exception:
         pred, err = safe_execute_solve(code_str, test_in.copy(), dsl_context, timeout_secs=10)
         return pred if err is None else None
-        
-    return results[0]
 
 def solve_single_task_with_budget(enumerator: DSLEnumerator, train_pairs: List[Tuple[np.ndarray, np.ndarray]], start_wall_time: float) -> Tuple[Optional[List[Tuple[str, Dict]]], float]:
     elapsed_total = time.time() - start_wall_time
@@ -70,7 +81,6 @@ def solve_single_task_with_budget(enumerator: DSLEnumerator, train_pairs: List[T
     return sequence, remaining_budget
 
 def main():
-    # Configure aggressive Garbage Collector settings for 9-hour stability
     gc.set_threshold(700, 10, 10)
 
     os.makedirs('tasks', exist_ok=True)
@@ -130,18 +140,20 @@ def main():
         if not train_pairs:
             print("  No training pairs found.")
             duration = time.time() - task_start_time
-            logger.log_task_result(task_id, False, [], [], [], test_pairs, duration)
+            logger.log_task_result(task_id, False, [], [], [], test_pairs, duration, 0, 0)
             completed_tasks.add(task_id)
             save_checkpoint(completed_tasks)
             continue
             
         sequence, remaining_budget = solve_single_task_with_budget(enumerator, train_pairs, start_wall_time)
         beam_scores = enumerator.last_beam_scores
+        nodes_explored = enumerator.nodes_explored
+        depth_reached = enumerator.depth_reached
         duration = time.time() - task_start_time
 
         if sequence is None:
             print("  No program found.")
-            logger.log_task_result(task_id, False, [], beam_scores, train_pairs, test_pairs, duration)
+            logger.log_task_result(task_id, False, [], beam_scores, train_pairs, test_pairs, duration, nodes_explored, depth_reached)
             completed_tasks.add(task_id)
             save_checkpoint(completed_tasks)
             continue
@@ -154,7 +166,7 @@ def main():
         code_str = f"def solve():\n    f = {lambda_str}\n    return f(input_grid.copy())"
         
         for idx, (test_in, test_out) in enumerate(test_pairs):
-            pred = apply_with_augmentations(code_str, test_in.copy(), dsl_context)
+            pred = apply_with_augmentations(code_str, test_in.copy(), train_pairs, dsl_context)
             if pred is None:
                 print(f"  Test {idx}: Error during execution")
                 success = False
@@ -166,7 +178,7 @@ def main():
                     print(f"    Predicted:\n{pred}")
                     print(f"    Expected:\n{test_out}")
 
-        logger.log_task_result(task_id, success, sequence, beam_scores, train_pairs, test_pairs, duration)
+        logger.log_task_result(task_id, success, sequence, beam_scores, train_pairs, test_pairs, duration, nodes_explored, depth_reached)
         completed_tasks.add(task_id)
         save_checkpoint(completed_tasks)
 

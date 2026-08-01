@@ -642,15 +642,15 @@ PER_TASK_TIME_BUDGET = 5.0   # seconds per task
 
 def find_competition_files():
     """Find the ARC-AGI-2 competition data files."""
-    # Search in /kaggle/input/
+    # Search in /kaggle/input/ recursively (up to 3 levels deep)
     if os.path.exists(KAGGLE_INPUT_DIR):
-        for comp_name in os.listdir(KAGGLE_INPUT_DIR):
-            comp_path = os.path.join(KAGGLE_INPUT_DIR, comp_name)
-            if os.path.isdir(comp_path):
-                # Look for the challenge files
-                for fname in os.listdir(comp_path):
-                    if 'challenges' in fname and fname.endswith('.json'):
-                        return comp_path
+        for root, dirs, files in os.walk(KAGGLE_INPUT_DIR):
+            for fname in files:
+                if 'challenges' in fname and fname.endswith('.json'):
+                    return root
+            # Limit depth to 3 levels
+            if root.count(os.sep) - KAGGLE_INPUT_DIR.count(os.sep) >= 3:
+                dirs.clear()
     
     # Check local directory (for testing)
     for fname in os.listdir('.'):

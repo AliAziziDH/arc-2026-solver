@@ -21,9 +21,11 @@ def load_checkpoint() -> set:
 
 def save_checkpoint(completed_tasks: set):
     os.makedirs(os.path.dirname(os.path.abspath(CHECKPOINT_PATH)), exist_ok=True)
-    with open(CHECKPOINT_PATH, "w") as f:
+    temp_path = CHECKPOINT_PATH + ".tmp"
+    with open(temp_path, "w") as f:
         for t in sorted(completed_tasks):
             f.write(t + "\n")
+    os.replace(temp_path, CHECKPOINT_PATH)  # Atomic rename
 
 def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[Tuple[np.ndarray, np.ndarray]]]:
     with open(filepath, 'r') as f:
@@ -84,26 +86,6 @@ def main():
     gc.set_threshold(700, 10, 10)
 
     os.makedirs('tasks', exist_ok=True)
-    
-    dummy_path = os.path.join('tasks', 'dummy_task.json')
-    if not os.path.exists(dummy_path):
-        dummy_data = {
-            "train": [
-                {
-                    "input": [[1, 2], [3, 4]],
-                    "output": [[3, 1], [4, 2]]
-                }
-            ],
-            "test": [
-                {
-                    "input": [[5, 6], [7, 8]],
-                    "output": [[7, 5], [8, 6]]
-                }
-            ]
-        }
-        with open(dummy_path, 'w') as f:
-            json.dump(dummy_data, f, indent=2)
-        print(f"Created {dummy_path}")
 
     completed_tasks = load_checkpoint()
     logger = StructuredLogger("logs/runs.jsonl")

@@ -103,7 +103,7 @@ Return ONLY executable Python code inside a markdown code block.
 
                 success = True
                 for inp_t, out_t in train_pairs:
-                    pred, err = safe_execute_solve(code_str, inp_t.copy(), dsl_context, timeout_secs=2)
+                    pred, err = safe_execute_solve(code_str, inp_t.copy(), dsl_context, timeout_secs=5)
                     if err or not np.array_equal(pred, out_t):
                         success = False
                         break

@@ -20,7 +20,8 @@ class StateMemo:
 
         # Enforce max size to prevent memory explosion
         if len(self.memo) >= self.max_size:
-            keys_to_remove = list(self.memo.keys())[:self.max_size // 2]
+            # Remove oldest 30% of keys efficiently
+            keys_to_remove = list(self.memo.keys())[:int(self.max_size * 0.3)]
             for k in keys_to_remove:
                 del self.memo[k]
 

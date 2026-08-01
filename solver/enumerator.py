@@ -89,6 +89,7 @@ class DSLEnumerator:
             if old == 0:
                 continue
             for new in unique_output:
+                # Explicit guard to prevent no-op transformations where source and target colors are identical
                 if old != new:
                     params.append({'old': int(old), 'new': int(new)})
         return params

@@ -1,0 +1,178 @@
+import os
+import gc
+import json
+import time
+import numpy as np
+from typing import List, Tuple, Optional, Dict, Any
+from solver.enumerator import DSLEnumerator
+from solver.sandbox import safe_execute_solve
+from core import primitives
+from utils.structured_logger import StructuredLogger
+from utils.memory_manager import force_memory_cleanup
+
+CHECKPOINT_PATH = "logs/checkpoint.txt"
+GLOBAL_TIME_BUDGET = 9 * 3600  # 9 hours
+
+def load_checkpoint() -> set:
+    if not os.path.exists(CHECKPOINT_PATH):
+        return set()
+    with open(CHECKPOINT_PATH, "r") as f:
+        return set(line.strip() for line in f if line.strip())
+
+def save_checkpoint(completed_tasks: set):
+    os.makedirs(os.path.dirname(os.path.abspath(CHECKPOINT_PATH)), exist_ok=True)
+    with open(CHECKPOINT_PATH, "w") as f:
+        for t in sorted(completed_tasks):
+            f.write(t + "\n")
+
+def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[Tuple[np.ndarray, np.ndarray]]]:
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+    
+    train_pairs = [(np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8)) for p in data.get('train', [])]
+    test_pairs = [(np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8)) for p in data.get('test', [])]
+    return train_pairs, test_pairs
+
+def apply_with_augmentations(code_str: str, test_in: np.ndarray, dsl_context: dict) -> Optional[np.ndarray]:
+    """Test Time Augmentation (TTA) for geometric tasks (rotations/flips)."""
+    augmentations = [
+        lambda g: g.copy(),
+        lambda g: primitives.rotate_90(g),
+        lambda g: primitives.rotate_90(primitives.rotate_90(g)),
+        lambda g: primitives.rotate_90(primitives.rotate_90(primitives.rotate_90(g))),
+        lambda g: primitives.flip_h(g),
+        lambda g: primitives.flip_v(g),
+    ]
+    
+    results = []
+    for aug in augmentations:
+        try:
+            # Apply augmentation to input
+            aug_in = aug(test_in.copy())
+            pred, err = safe_execute_solve(code_str, aug_in, dsl_context, timeout_secs=5)
+            if err is None and pred is not None:
+                results.append(pred)
+        except Exception:
+            continue
+            
+    if not results:
+        # Fallback to standard execution without TTA
+        pred, err = safe_execute_solve(code_str, test_in.copy(), dsl_context, timeout_secs=10)
+        return pred if err is None else None
+        
+    return results[0]
+
+def solve_single_task_with_budget(enumerator: DSLEnumerator, train_pairs: List[Tuple[np.ndarray, np.ndarray]], start_wall_time: float) -> Tuple[Optional[List[Tuple[str, Dict]]], float]:
+    elapsed_total = time.time() - start_wall_time
+    remaining_budget = max(0.0, GLOBAL_TIME_BUDGET - elapsed_total)
+    
+    sequence = enumerator.search(train_pairs, remaining_time=remaining_budget)
+    return sequence, remaining_budget
+
+def main():
+    # Configure aggressive Garbage Collector settings for 9-hour stability
+    gc.set_threshold(700, 10, 10)
+
+    os.makedirs('tasks', exist_ok=True)
+    
+    dummy_path = os.path.join('tasks', 'dummy_task.json')
+    if not os.path.exists(dummy_path):
+        dummy_data = {
+            "train": [
+                {
+                    "input": [[1, 2], [3, 4]],
+                    "output": [[3, 1], [4, 2]]
+                }
+            ],
+            "test": [
+                {
+                    "input": [[5, 6], [7, 8]],
+                    "output": [[7, 5], [8, 6]]
+                }
+            ]
+        }
+        with open(dummy_path, 'w') as f:
+            json.dump(dummy_data, f, indent=2)
+        print(f"Created {dummy_path}")
+
+    completed_tasks = load_checkpoint()
+    logger = StructuredLogger("logs/runs.jsonl")
+    enumerator = DSLEnumerator(beam_width=32, max_depth=3)
+    
+    dsl_context = {
+        name: getattr(primitives, name)
+        for name in [
+            'rotate_90', 'flip_h', 'flip_v', 'transpose', 'crop_bbox', 'scale',
+            'replace_color', 'keep_only_color', 'remove_color', 'extract_largest',
+            'extract_smallest', 'gravity_down', 'fill_holes', 'tile_to_size', 'pad_to_size'
+        ]
+    }
+    for macro_name in ['crop_then_gravity', 'extract_largest_and_center', 'remove_small_noise', 'symmetrize_hv', 'scale_to_output']:
+        if hasattr(enumerator, 'primitive_map') and macro_name in enumerator.primitive_map:
+            dsl_context[macro_name] = enumerator.primitive_map[macro_name]
+
+    start_wall_time = time.time()
+    task_count = 0
+
+    for filename in sorted(os.listdir('tasks')):
+        if not filename.endswith('.json'):
+            continue
+        task_id = filename[:-5]
+        if task_id in completed_tasks:
+            print(f"Skipping already completed task: {task_id}")
+            continue
+
+        filepath = os.path.join('tasks', filename)
+        print(f"\nProcessing task: {filename}")
+        task_start_time = time.time()
+        
+        train_pairs, test_pairs = load_task(filepath)
+        if not train_pairs:
+            print("  No training pairs found.")
+            duration = time.time() - task_start_time
+            logger.log_task_result(task_id, False, [], [], [], test_pairs, duration)
+            completed_tasks.add(task_id)
+            save_checkpoint(completed_tasks)
+            continue
+            
+        sequence, remaining_budget = solve_single_task_with_budget(enumerator, train_pairs, start_wall_time)
+        beam_scores = enumerator.last_beam_scores
+        duration = time.time() - task_start_time
+
+        if sequence is None:
+            print("  No program found.")
+            logger.log_task_result(task_id, False, [], beam_scores, train_pairs, test_pairs, duration)
+            completed_tasks.add(task_id)
+            save_checkpoint(completed_tasks)
+            continue
+            
+        print(f"  Found program sequence: {sequence}")
+        lambda_str = enumerator.compile_to_python(sequence)
+        print(f"  Compiled DSL lambda: {lambda_str}")
+        
+        success = True
+        code_str = f"def solve():\n    f = {lambda_str}\n    return f(input_grid.copy())"
+        
+        for idx, (test_in, test_out) in enumerate(test_pairs):
+            pred = apply_with_augmentations(code_str, test_in.copy(), dsl_context)
+            if pred is None:
+                print(f"  Test {idx}: Error during execution")
+                success = False
+            else:
+                match = np.array_equal(pred, test_out)
+                print(f"  Test {idx}: Match = {match}")
+                if not match:
+                    success = False
+                    print(f"    Predicted:\n{pred}")
+                    print(f"    Expected:\n{test_out}")
+
+        logger.log_task_result(task_id, success, sequence, beam_scores, train_pairs, test_pairs, duration)
+        completed_tasks.add(task_id)
+        save_checkpoint(completed_tasks)
+
+        task_count += 1
+        if task_count % 10 == 0:
+            force_memory_cleanup()
+
+if __name__ == '__main__':
+    main()

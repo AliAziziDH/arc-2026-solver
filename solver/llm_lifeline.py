@@ -1,4 +1,6 @@
 import os
+import time
+import random
 import torch
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
@@ -45,7 +47,8 @@ class LLMSurgicalLifeline:
         self,
         train_pairs: List[Tuple[np.ndarray, np.ndarray]],
         partial_sequence: List[Tuple[str, Dict]],
-        dsl_context: Dict[str, Any]
+        dsl_context: Dict[str, Any],
+        max_retries: int = 10
     ) -> Optional[List[Tuple[str, Dict]]]:
         if not self._load_model():
             return None
@@ -54,8 +57,9 @@ class LLMSurgicalLifeline:
         current = inp.copy()
         try:
             for name, params in partial_sequence:
-                func = dsl_context[name]
-                current = func(current, **params)
+                func = dsl_context.get(name)
+                if func is not None:
+                    current = func(current.copy(), **params)
         except Exception:
             return None
 
@@ -74,39 +78,52 @@ Return ONLY executable Python code inside a markdown code block.
             {"role": "user", "content": prompt}
         ]
 
-        try:
-            text = self._tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True
-            )
+        wait_time = 5.0
+        for attempt in range(max_retries):
+            try:
+                text = self._tokenizer.apply_chat_template(
+                    messages,
+                    tokenize=False,
+                    add_generation_prompt=True
+                )
 
-            inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
-            
-            outputs = self._model.generate(
-                **inputs,
-                max_new_tokens=512,
-                temperature=0.2,
-                do_sample=True
-            )
-            response_text = self._tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
-            
-            code_str = self._extract_code(response_text)
-            if not code_str:
-                return None
+                inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
+                
+                outputs = self._model.generate(
+                    **inputs,
+                    max_new_tokens=512,
+                    temperature=0.2 + (0.05 * attempt),
+                    do_sample=True
+                )
+                response_text = self._tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
+                
+                code_str = self._extract_code(response_text)
+                if not code_str:
+                    continue
 
-            success = True
-            for inp_t, out_t in train_pairs:
-                pred, err = safe_execute_solve(code_str, inp_t, dsl_context, timeout_secs=2)
-                if err or not np.array_equal(pred, out_t):
-                    success = False
-                    break
+                success = True
+                for inp_t, out_t in train_pairs:
+                    pred, err = safe_execute_solve(code_str, inp_t.copy(), dsl_context, timeout_secs=2)
+                    if err or not np.array_equal(pred, out_t):
+                        success = False
+                        break
 
-            if success:
-                return [('llm_custom_patch', {'code_str': code_str})]
-        except Exception as e:
-            print(f"LLM generation error: {e}")
-            return None
+                if success:
+                    return [('llm_custom_patch', {'code_str': code_str})]
+            except Exception as e:
+                error_msg = str(e).lower()
+                # Check for rate limit / quota exhaustion / 429 / resource exhausted
+                if any(err_keyword in error_msg for err_keyword in ['429', 'resource_exhausted', 'rate_limit', 'quota', 'gpu out of memory', 'oom']):
+                    jitter = random.uniform(0.1, 1.5)
+                    sleep_duration = wait_time + jitter
+                    print(f"[WARNING] Rate limit / quota / OOM encountered on attempt {attempt + 1}: {e}. Retrying in {sleep_duration:.2f} seconds...")
+                    time.sleep(sleep_duration)
+                    wait_time = min(wait_time * 2, 120.0)  # Exponential backoff capped at 120s
+                    continue
+                else:
+                    print(f"LLM generation attempt {attempt + 1} error: {e}")
+                    time.sleep(2.0)
+                    continue
 
         return None
 

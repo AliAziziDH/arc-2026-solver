@@ -51,10 +51,12 @@ class ProgramNode:
         return hash(tuple(self.sequence))
 
 class DSLEnumerator:
-    def __init__(self, beam_width: int = 64, max_depth: int = 3):
+    def __init__(self, beam_width: int = 32, max_depth: int = 3):
         self.beam_width = beam_width
         self.max_depth = max_depth
         self.last_beam_scores: List[float] = []
+        self.nodes_explored: int = 0
+        self.depth_reached: int = 0
         self.llm_lifeline = LLMSurgicalLifeline()
         self.primitive_map: Dict[str, Callable] = {
             'rotate_90': rotate_90, 'flip_h': flip_h, 'flip_v': flip_v,
@@ -190,7 +192,6 @@ class DSLEnumerator:
         if not valid_sequences:
             return []
         
-        # If we have 3 or more train pairs and multiple valid sequences, use Leave-One-Out Cross-Validation + MDL (shortest length)
         if len(train_pairs) >= 3:
             best_seq = valid_sequences[0]
             best_cv_score = -1
@@ -199,24 +200,24 @@ class DSLEnumerator:
             for seq in valid_sequences:
                 cv_matches = 0
                 for i in range(len(train_pairs)):
-                    # Leave-One-Out: train on all except i, test on i
                     loo_train = train_pairs[:i] + train_pairs[i+1:]
                     if self._verify_on_all(seq, loo_train):
                         cv_matches += 1
                 
                 seq_len = len(seq)
-                # Score based on CV matches (higher is better) and MDL complexity (shorter is better)
                 if cv_matches > best_cv_score or (cv_matches == best_cv_score and seq_len < best_length):
                     best_cv_score = cv_matches
                     best_length = seq_len
                     best_seq = seq
             return best_seq
         else:
-            # MDL: pick shortest sequence
             return min(valid_sequences, key=len)
 
     def search(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], remaining_time: Optional[float] = None) -> Optional[List[Tuple[str, Dict]]]:
         self.last_beam_scores = []
+        self.nodes_explored = 0
+        self.depth_reached = 0
+
         if not train_pairs:
             return None
 
@@ -234,12 +235,14 @@ class DSLEnumerator:
         valid_sequences = []
 
         for depth in range(1, self.max_depth + 1):
+            self.depth_reached = depth
             candidates = []
             for node in beam:
                 for primitive_name, func in self.primitive_map.items():
                     params_list = self._get_params(primitive_name, node.current_grid, first_output)
                     for params in params_list:
                         try:
+                            self.nodes_explored += 1
                             next_grid = func(node.current_grid, **params)
                             if not next_grid.flags['C_CONTIGUOUS']:
                                 next_grid = np.ascontiguousarray(next_grid, dtype=np.int8)
@@ -262,10 +265,16 @@ class DSLEnumerator:
                 break
 
             candidates.sort(key=lambda x: x.score, reverse=True)
-            beam = candidates[:self.beam_width]
+            
+            # Dynamic Beam Pruning: drop candidates scoring below 50% of the best candidate in that beam level
+            best_cand_score = candidates[0].score if candidates else 0.0
+            threshold = best_cand_score * 0.5
+            filtered_candidates = [c for c in candidates if c.score >= threshold]
+
+            beam = filtered_candidates[:self.beam_width]
             self.last_beam_scores = [n.score for n in beam]
 
-            best_node = beam[0]
+            best_node = beam[0] if beam else candidates[0]
             if best_node.score == 1.0:
                 fixed_seq = self._verify_and_harmonize(best_node.sequence, train_pairs)
                 if fixed_seq is not None:
@@ -289,7 +298,6 @@ class DSLEnumerator:
             if valid_sequences:
                 return self._select_best_sequence(valid_sequences, train_pairs)
 
-            # LLM Surgical Lifeline fallback: trigger only if remaining time is ample (> 1800s) or urgency requires it
             best_score = beam[0].score
             if 0.75 <= best_score < 1.0 and len(train_pairs) >= 2:
                 if remaining_time is None or remaining_time > 1800:

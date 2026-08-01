@@ -1,6 +1,5 @@
 import os
 import json
-import numpy as np
 from datetime import datetime
 
 class StructuredLogger:
@@ -13,14 +12,9 @@ class StructuredLogger:
             return "NO_PROGRAM_FOUND"
         if best_score < 1.0:
             return "PARTIAL_MATCH_FAILURE"
-        
-        # Check if train pairs match
-        for inp, out in train_pairs:
-            current = inp.copy()
-            # We can check via a helper or simulated execution
         return "TRAIN_OVERFIT_OR_TEST_MISMATCH"
 
-    def log_task_result(self, task_id: str, success: bool, sequence: list, beam_scores: list, train_pairs: list, test_pairs: list, duration_secs: float):
+    def log_task_result(self, task_id: str, success: bool, sequence: list, beam_scores: list, train_pairs: list, test_pairs: list, duration_secs: float, nodes_explored: int = 0, depth_reached: int = 0):
         best_score = max(beam_scores) if beam_scores else 0.0
         failure_type = None if success else self.classify_failure(train_pairs, best_score, sequence)
 
@@ -32,7 +26,9 @@ class StructuredLogger:
             "beam_scores": beam_scores,
             "program_sequence": sequence,
             "failure_type": failure_type,
-            "duration_secs": duration_secs
+            "duration_secs": duration_secs,
+            "nodes_explored": nodes_explored,
+            "depth_reached": depth_reached
         }
 
         with open(self.log_filepath, "a") as f:

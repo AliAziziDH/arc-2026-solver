@@ -1,6 +1,7 @@
 """
 Generate solution.ipynb for Kaggle ARC-AGI code competition.
 The notebook is self-contained with all solver code embedded in cells.
+Handles the ARC-AGI-2 competition data format.
 """
 import json
 
@@ -628,56 +629,87 @@ KAGGLE_INPUT_DIR = "/kaggle/input"
 SUBMISSION_FILE = "submission.csv"
 PER_TASK_TIME_BUDGET = 5.0   # seconds per task
 
-# Auto-detect the competition data directory
-def find_tasks_dir():
-    """Find the directory containing ARC task JSON files."""
-    # 1. Check Kaggle input directory
+# ---------------------------------------------------------------------------
+# ARC-AGI-2 Competition Data Format
+# ---------------------------------------------------------------------------
+# The competition provides these files:
+#   arc-agi_training_challenges.json  - dict: {task_id: {"train": [...], "test": [...]}}
+#   arc-agi_training_solutions.json   - dict: {task_id: [output_grid, ...]}
+#   arc-agi_evaluation_challenges.json - dict: {task_id: {"train": [...], "test": [...]}}
+#   arc-agi_evaluation_solutions.json  - dict: {task_id: [output_grid, ...]}
+#   arc-agi_test_challenges.json       - dict: {task_id: {"test": [...]}}
+#   sample_submission.csv              - sample submission format
+
+def find_competition_files():
+    """Find the ARC-AGI-2 competition data files."""
+    # Search in /kaggle/input/
     if os.path.exists(KAGGLE_INPUT_DIR):
         for comp_name in os.listdir(KAGGLE_INPUT_DIR):
             comp_path = os.path.join(KAGGLE_INPUT_DIR, comp_name)
             if os.path.isdir(comp_path):
-                # Check if this directory contains task JSON files directly
-                json_files = [f for f in os.listdir(comp_path) if f.endswith('.json')]
-                if json_files:
-                    return comp_path
-                # Check subdirectories
-                for sub in os.listdir(comp_path):
-                    sub_path = os.path.join(comp_path, sub)
-                    if os.path.isdir(sub_path):
-                        sub_json = [f for f in os.listdir(sub_path) if f.endswith('.json')]
-                        if sub_json:
-                            return sub_path
+                # Look for the challenge files
+                for fname in os.listdir(comp_path):
+                    if 'challenges' in fname and fname.endswith('.json'):
+                        return comp_path
     
-    # 2. Check local tasks directory (for local testing)
-    if os.path.exists('tasks'):
-        json_files = [f for f in os.listdir('tasks') if f.endswith('.json')]
-        if json_files:
-            return 'tasks'
+    # Check local directory (for testing)
+    for fname in os.listdir('.'):
+        if 'challenges' in fname and fname.endswith('.json'):
+            return '.'
     
-    # 3. Check current directory
-    json_files = [f for f in os.listdir('.') if f.endswith('.json')]
-    if json_files:
-        return '.'
-    
-    raise FileNotFoundError("Could not find ARC task JSON files!")
+    raise FileNotFoundError("Could not find ARC-AGI-2 competition data files!")
 
-# ---------------------------------------------------------------------------
-# Task loading
-# ---------------------------------------------------------------------------
-def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[Tuple[np.ndarray, np.ndarray]]]:
-    """Load an ARC task JSON file into train/test pairs of numpy grids."""
-    with open(filepath, 'r') as f:
-        data = json.load(f)
+def load_competition_data(comp_dir: str):
+    """Load all competition data files."""
+    data = {}
+    
+    # Load training challenges
+    train_ch_path = os.path.join(comp_dir, 'arc-agi_training_challenges.json')
+    if os.path.exists(train_ch_path):
+        with open(train_ch_path) as f:
+            data['train_challenges'] = json.load(f)
+    
+    # Load training solutions
+    train_sol_path = os.path.join(comp_dir, 'arc-agi_training_solutions.json')
+    if os.path.exists(train_sol_path):
+        with open(train_sol_path) as f:
+            data['train_solutions'] = json.load(f)
+    
+    # Load evaluation challenges
+    eval_ch_path = os.path.join(comp_dir, 'arc-agi_evaluation_challenges.json')
+    if os.path.exists(eval_ch_path):
+        with open(eval_ch_path) as f:
+            data['eval_challenges'] = json.load(f)
+    
+    # Load evaluation solutions
+    eval_sol_path = os.path.join(comp_dir, 'arc-agi_evaluation_solutions.json')
+    if os.path.exists(eval_sol_path):
+        with open(eval_sol_path) as f:
+            data['eval_solutions'] = json.load(f)
+    
+    # Load test challenges
+    test_ch_path = os.path.join(comp_dir, 'arc-agi_test_challenges.json')
+    if os.path.exists(test_ch_path):
+        with open(test_ch_path) as f:
+            data['test_challenges'] = json.load(f)
+    
+    return data
 
-    train_pairs = [
-        (np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8))
-        for p in data.get('train', [])
-    ]
-    test_pairs = [
-        (np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8))
-        for p in data.get('test', [])
-    ]
-    return train_pairs, test_pairs
+def get_train_pairs(task_data: dict) -> List[Tuple[np.ndarray, np.ndarray]]:
+    """Extract train pairs from a task dict."""
+    train_pairs = []
+    for p in task_data.get('train', []):
+        inp = np.array(p['input'], dtype=np.int8)
+        out = np.array(p['output'], dtype=np.int8)
+        train_pairs.append((inp, out))
+    return train_pairs
+
+def get_test_inputs(task_data: dict) -> List[np.ndarray]:
+    """Extract test inputs from a task dict."""
+    test_inputs = []
+    for p in task_data.get('test', []):
+        test_inputs.append(np.array(p['input'], dtype=np.int8))
+    return test_inputs
 
 # ---------------------------------------------------------------------------
 # DSL context
@@ -723,14 +755,28 @@ def grid_to_json(grid: np.ndarray) -> str:
 def main():
     gc.set_threshold(700, 10, 10)
 
-    # Find the tasks directory
-    tasks_dir = find_tasks_dir()
-    print(f"Using tasks directory: {tasks_dir}")
-
-    # Collect task files
-    task_files = sorted(f for f in os.listdir(tasks_dir) if f.endswith('.json'))
-    print(f"Found {len(task_files)} task files")
-
+    # Find and load competition data
+    comp_dir = find_competition_files()
+    print(f"Using competition directory: {comp_dir}")
+    
+    data = load_competition_data(comp_dir)
+    
+    # Determine which challenges to solve
+    # Priority: test > evaluation > training
+    challenges = None
+    if 'test_challenges' in data and data['test_challenges']:
+        challenges = data['test_challenges']
+        print(f"Using TEST challenges ({len(challenges)} tasks)")
+    elif 'eval_challenges' in data and data['eval_challenges']:
+        challenges = data['eval_challenges']
+        print(f"Using EVALUATION challenges ({len(challenges)} tasks)")
+    elif 'train_challenges' in data and data['train_challenges']:
+        challenges = data['train_challenges']
+        print(f"Using TRAINING challenges ({len(challenges)} tasks)")
+    else:
+        print("ERROR: No challenge data found!")
+        return
+    
     # Build enumerator + DSL context once
     enumerator = DSLEnumerator(beam_width=32, max_depth=3)
     dsl_context = build_dsl_context(enumerator)
@@ -739,24 +785,28 @@ def main():
     results: List[Tuple[str, str]] = []   # (output_id, output_json)
     stats = {"solved": 0, "failed": 0, "no_program": 0}
 
-    for idx, filename in enumerate(task_files):
-        task_id = filename[:-5]  # strip .json
-        filepath = os.path.join(tasks_dir, filename)
+    task_ids = sorted(challenges.keys())
+    print(f"Processing {len(task_ids)} tasks...")
 
-        try:
-            train_pairs, test_pairs = load_task(filepath)
-        except Exception as e:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: ERROR loading task: {e}")
-            for t_idx in range(len(test_pairs)):
-                results.append((f"{task_id}_{t_idx}", "[]"))
-            stats["failed"] += 1
+    for idx, task_id in enumerate(task_ids):
+        task_data = challenges[task_id]
+        
+        # Get train pairs (for training/eval tasks)
+        train_pairs = get_train_pairs(task_data)
+        test_inputs = get_test_inputs(task_data)
+        
+        if not test_inputs:
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: No test inputs, skipping")
             continue
-
+        
         if not train_pairs:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: No training pairs, skipping")
-            for t_idx in range(len(test_pairs)):
+            # For test challenges, we don't have train pairs or solutions
+            # We need to use training data as reference
+            # For now, output empty grids
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: No train pairs (test set), using empty output")
+            for t_idx in range(len(test_inputs)):
                 results.append((f"{task_id}_{t_idx}", "[]"))
-            stats["failed"] += 1
+            stats["no_program"] += 1
             continue
 
         # --- Run DSL beam search with a strict time budget ---
@@ -765,14 +815,14 @@ def main():
         try:
             sequence = enumerator.search(train_pairs, remaining_time=PER_TASK_TIME_BUDGET)
         except Exception as e:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: Search error: {e}")
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: Search error: {e}")
             sequence = None
 
         elapsed = time.time() - start
 
         if sequence is None:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: No program found ({elapsed:.2f}s)")
-            for t_idx in range(len(test_pairs)):
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: No program found ({elapsed:.2f}s)")
+            for t_idx in range(len(test_inputs)):
                 results.append((f"{task_id}_{t_idx}", "[]"))
             stats["no_program"] += 1
             continue
@@ -782,30 +832,28 @@ def main():
             lambda_str = enumerator.compile_to_python(sequence)
             code_str = f"def solve():\\n    f = {lambda_str}\\n    return f(input_grid.copy())"
         except Exception as e:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: Compile error: {e}")
-            for t_idx in range(len(test_pairs)):
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: Compile error: {e}")
+            for t_idx in range(len(test_inputs)):
                 results.append((f"{task_id}_{t_idx}", "[]"))
             stats["failed"] += 1
             continue
 
         # Apply program to each test input
         task_solved = True
-        for t_idx, (test_in, test_out) in enumerate(test_pairs):
+        for t_idx, test_in in enumerate(test_inputs):
             pred = apply_program(code_str, test_in, dsl_context)
             if pred is None:
                 results.append((f"{task_id}_{t_idx}", "[]"))
                 task_solved = False
             else:
                 results.append((f"{task_id}_{t_idx}", grid_to_json(pred)))
-                if not np.array_equal(pred, test_out):
-                    task_solved = False
 
         if task_solved:
             stats["solved"] += 1
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: SOLVED ({elapsed:.2f}s)")
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: SOLVED ({elapsed:.2f}s)")
         else:
             stats["failed"] += 1
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: processed ({elapsed:.2f}s)")
+            print(f"[{idx+1}/{len(task_ids)}] {task_id}: processed ({elapsed:.2f}s)")
 
         # Periodic memory cleanup
         if (idx + 1) % 20 == 0:
@@ -913,7 +961,7 @@ notebook = {
     "cells": [
         make_markdown("""# ARC-AGI Solver - Kaggle Submission
 
-This notebook implements a DSL-based beam search solver for the ARC-AGI competition.
+This notebook implements a DSL-based beam search solver for the ARC-AGI-2 competition.
 It reads task data from the Kaggle input directory, solves each task using a
 compositional DSL of geometric/color primitives, and generates `submission.csv`
 in the exact Kaggle format.

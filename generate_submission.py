@@ -1,22 +1,15 @@
 """
 Kaggle ARC-AGI Submission Generator
 ===================================
-Generates submission.csv in the exact Kaggle ARC competition format:
-  - Column 1: output_id  -> "{task_id}_{test_index}"  (e.g. "007bbfb7_0")
-  - Column 2: output     -> JSON-serialized grid     (e.g. "[[0, 1], [1, 0]]")
-
-This script uses the DSL beam-search enumerator with a strict per-task
-time budget, then applies the best-found program to each test input.
-It does NOT run the heavy LLM lifeline or unbounded search loops.
+Generates submission.json in the exact Kaggle ARC competition format.
 """
 
 import os
 import gc
 import json
 import time
-import csv
 import numpy as np
-from typing import List, Tuple, Optional, Dict, Any
+from typing import List, Tuple, Optional
 
 from solver.enumerator import DSLEnumerator
 from solver.sandbox import safe_execute_solve
@@ -27,7 +20,7 @@ from utils.memory_manager import force_memory_cleanup
 # Configuration
 # ---------------------------------------------------------------------------
 TASKS_DIR = "tasks"
-SUBMISSION_FILE = "submission.csv"
+SUBMISSION_FILE = "submission.json"
 PER_TASK_TIME_BUDGET = 5.0   # seconds per task (fast, avoids heavy loops)
 MAX_TASKS = None             # None = process all tasks in tasks/ dir
 
@@ -44,7 +37,7 @@ def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[
         for p in data.get('train', [])
     ]
     test_pairs = [
-        (np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8))
+        (np.array(p['input'], dtype=np.int8), np.array(p.get('output', p['input']), dtype=np.int8))
         for p in data.get('test', [])
     ]
     return train_pairs, test_pairs
@@ -79,9 +72,9 @@ def apply_program(code_str: str, test_in: np.ndarray, dsl_context: dict) -> Opti
         pass
     return None
 
-def grid_to_json(grid: np.ndarray) -> str:
-    """Serialize a numpy grid to the JSON string format Kaggle expects."""
-    return json.dumps(grid.astype(int).tolist())
+def grid_to_list(grid: np.ndarray) -> List[List[int]]:
+    """Serialize a numpy grid to a list of lists."""
+    return grid.astype(int).tolist()
 
 # ---------------------------------------------------------------------------
 # Main submission generation
@@ -102,27 +95,30 @@ def main():
     dsl_context = build_dsl_context(enumerator)
 
     # Track results
-    results: List[Tuple[str, str]] = []   # (output_id, output_json)
+    submission_data = {}
     stats = {"solved": 0, "failed": 0, "no_program": 0}
 
     for idx, filename in enumerate(task_files):
         task_id = filename[:-5]  # strip .json
         filepath = os.path.join(TASKS_DIR, filename)
 
+        submission_data[task_id] = []
+
         try:
             train_pairs, test_pairs = load_task(filepath)
         except Exception as e:
             print(f"[{idx+1}/{len(task_files)}] {task_id}: ERROR loading task: {e}")
-            # Still need to output something for each test input
-            for t_idx in range(len(test_pairs)):
-                results.append((f"{task_id}_{t_idx}", "[]"))
+            # Output empty fallback for each test pair
+            for _ in range(max(1, len(test_pairs) if 'test_pairs' in locals() else 1)):
+                submission_data[task_id].append({"attempt_1": [[0]], "attempt_2": [[0]]})
             stats["failed"] += 1
             continue
 
         if not train_pairs:
             print(f"[{idx+1}/{len(task_files)}] {task_id}: No training pairs, skipping")
-            for t_idx in range(len(test_pairs)):
-                results.append((f"{task_id}_{t_idx}", "[]"))
+            for t_in, _ in test_pairs:
+                default_pred = grid_to_list(t_in)
+                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
             stats["failed"] += 1
             continue
 
@@ -139,8 +135,9 @@ def main():
 
         if sequence is None:
             print(f"[{idx+1}/{len(task_files)}] {task_id}: No program found ({elapsed:.2f}s)")
-            for t_idx in range(len(test_pairs)):
-                results.append((f"{task_id}_{t_idx}", "[]"))
+            for t_in, _ in test_pairs:
+                default_pred = grid_to_list(t_in)
+                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
             stats["no_program"] += 1
             continue
 
@@ -150,8 +147,9 @@ def main():
             code_str = f"def solve():\n    f = {lambda_str}\n    return f(input_grid.copy())"
         except Exception as e:
             print(f"[{idx+1}/{len(task_files)}] {task_id}: Compile error: {e}")
-            for t_idx in range(len(test_pairs)):
-                results.append((f"{task_id}_{t_idx}", "[]"))
+            for t_in, _ in test_pairs:
+                default_pred = grid_to_list(t_in)
+                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
             stats["failed"] += 1
             continue
 
@@ -160,10 +158,12 @@ def main():
         for t_idx, (test_in, test_out) in enumerate(test_pairs):
             pred = apply_program(code_str, test_in, dsl_context)
             if pred is None:
-                results.append((f"{task_id}_{t_idx}", "[]"))
+                default_pred = grid_to_list(test_in)
+                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
                 task_solved = False
             else:
-                results.append((f"{task_id}_{t_idx}", grid_to_json(pred)))
+                pred_list = grid_to_list(pred)
+                submission_data[task_id].append({"attempt_1": pred_list, "attempt_2": pred_list})
                 if not np.array_equal(pred, test_out):
                     task_solved = False
 
@@ -179,17 +179,14 @@ def main():
             force_memory_cleanup()
 
     # -----------------------------------------------------------------------
-    # Write submission.csv in Kaggle format
+    # Write submission.json in Kaggle format
     # -----------------------------------------------------------------------
-    with open(SUBMISSION_FILE, 'w', newline='') as f:
-        writer = csv.writer(f)
-        writer.writerow(['output_id', 'output'])
-        for output_id, output_json in results:
-            writer.writerow([output_id, output_json])
+    with open(SUBMISSION_FILE, 'w') as f:
+        json.dump(submission_data, f)
 
     print(f"\n{'='*60}")
     print(f"Submission written to {SUBMISSION_FILE}")
-    print(f"  Total rows: {len(results)}")
+    print(f"  Total tasks: {len(submission_data)}")
     print(f"  Tasks solved: {stats['solved']}")
     print(f"  Tasks failed: {stats['failed']}")
     print(f"  Tasks no program: {stats['no_program']}")
@@ -199,48 +196,33 @@ def main():
     verify_submission(SUBMISSION_FILE)
 
 def verify_submission(filepath: str):
-    """Verify the submission.csv matches Kaggle ARC competition requirements."""
+    """Verify the submission.json matches Kaggle ARC competition requirements."""
     print(f"\nVerifying {filepath}...")
 
     with open(filepath, 'r') as f:
-        reader = csv.reader(f)
-        header = next(reader)
-        rows = list(reader)
+        data = json.load(f)
 
-    # Check header
-    assert header == ['output_id', 'output'], f"Invalid header: {header}"
-    print(f"  [OK] Header: {header}")
+    # Check data is dict
+    assert isinstance(data, dict), "Root must be a JSON object (dict)."
+    print(f"  [OK] Root is dict")
 
-    # Check no empty rows
-    assert len(rows) > 0, "Submission is empty!"
-    print(f"  [OK] {len(rows)} data rows")
-
-    # Check each row
-    valid_ids = 0
+    # Check each task
+    valid_tasks = 0
     valid_outputs = 0
-    for i, (output_id, output) in enumerate(rows):
-        # output_id must be "{task_id}_{test_index}"
-        if '_' in output_id:
-            task_part, idx_part = output_id.rsplit('_', 1)
-            if task_part and idx_part.isdigit():
-                valid_ids += 1
+    for task_id, test_outputs in data.items():
+        assert isinstance(test_outputs, list), f"Task {task_id} value must be a list."
+        valid_tasks += 1
 
-        # output must be valid JSON of a 2D list
-        try:
-            grid = json.loads(output)
-            if isinstance(grid, list) and all(isinstance(row, list) for row in grid):
-                valid_outputs += 1
-        except json.JSONDecodeError:
-            pass
+        for out in test_outputs:
+            assert isinstance(out, dict), "Test output must be a dict."
+            assert "attempt_1" in out, "Missing attempt_1"
+            assert "attempt_2" in out, "Missing attempt_2"
+            assert isinstance(out["attempt_1"], list), "attempt_1 must be a 2D array"
+            assert isinstance(out["attempt_2"], list), "attempt_2 must be a 2D array"
+            valid_outputs += 1
 
-    print(f"  [OK] {valid_ids}/{len(rows)} valid output_ids")
-    print(f"  [OK] {valid_outputs}/{len(rows)} valid JSON outputs")
-
-    # Show first 3 rows as sample
-    print(f"\n  Sample rows:")
-    for output_id, output in rows[:3]:
-        print(f"    {output_id} -> {output[:80]}{'...' if len(output) > 80 else ''}")
-
+    print(f"  [OK] {valid_tasks}/{len(data)} valid task_ids")
+    print(f"  [OK] {valid_outputs} valid test outputs with attempt_1/2")
     print(f"\n  Verification PASSED ✓")
 
 if __name__ == '__main__':

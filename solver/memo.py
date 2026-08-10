@@ -1,4 +1,5 @@
 import numpy as np
+from core.grid import canonicalize_colors
 
 class StateMemo:
     def __init__(self, max_size: int = 200_000):
@@ -6,13 +7,16 @@ class StateMemo:
         self.memo = {}
 
     def try_enter(self, grid, depth):
+        # Apply color canonicalization for equivariance
+        canon_grid = canonicalize_colors(grid)
+
         # Ensure grid is a numpy array with exact byte-level canonicalization
-        grid = np.asarray(grid, dtype=np.int8, order='C')
-        if not grid.flags['C_CONTIGUOUS']:
-            grid = np.ascontiguousarray(grid, dtype=np.int8)
+        canon_grid = np.asarray(canon_grid, dtype=np.int8, order='C')
+        if not canon_grid.flags['C_CONTIGUOUS']:
+            canon_grid = np.ascontiguousarray(canon_grid, dtype=np.int8)
 
         # Blazing-fast hash lookup using bytes representation
-        grid_bytes = grid.tobytes()
+        grid_bytes = canon_grid.tobytes()
 
         # Check if the state is already in the memo
         if grid_bytes in self.memo:

@@ -6,6 +6,7 @@ from core.primitives import (
     replace_color, keep_only_color, remove_color, extract_largest,
     extract_smallest, gravity_down, fill_holes, tile_to_size, pad_to_size
 )
+from core.grid import get_object_metadata
 from solver.memo import StateMemo
 from solver.llm_lifeline import LLMSurgicalLifeline
 
@@ -89,7 +90,6 @@ class DSLEnumerator:
             if old == 0:
                 continue
             for new in unique_output:
-                # Explicit guard to prevent no-op transformations where source and target colors are identical
                 if old != new:
                     params.append({'old': int(old), 'new': int(new)})
         return params
@@ -161,7 +161,6 @@ class DSLEnumerator:
         if ph == th and pw == tw:
             return []
 
-        # 1. Try crop_bbox
         try:
             cropped = crop_bbox(pred)
             if cropped.shape == (th, tw) and np.array_equal(cropped, target):
@@ -169,7 +168,6 @@ class DSLEnumerator:
         except Exception:
             pass
 
-        # 2. Try pad_to_size
         try:
             padded = pad_to_size(pred, target_h=th, target_w=tw, bg=0)
             if padded.shape == (th, tw) and np.array_equal(padded, target):
@@ -177,7 +175,6 @@ class DSLEnumerator:
         except Exception:
             pass
 
-        # 3. Try scale
         for f in [2, 3, 4]:
             if ph * f == th and pw * f == tw:
                 try:
@@ -214,7 +211,46 @@ class DSLEnumerator:
         else:
             return min(valid_sequences, key=len)
 
-    def search(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], remaining_time: Optional[float] = None) -> Optional[List[Tuple[str, Dict]]]:
+    def _decompose_and_solve(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]]) -> Optional[List[Tuple[str, Dict]]]:
+        first_input, first_output = train_pairs[0]
+        metadata = get_object_metadata(first_input)
+
+        if not metadata or len(metadata) <= 1:
+            return None
+
+        colors_to_isolate = list(set([m["color"] for m in metadata if m["color"] > 0]))
+        if not colors_to_isolate:
+            return None
+
+        composite_sequence = []
+        current_train_pairs = [(inp.copy(), out.copy()) for inp, out in train_pairs]
+
+        for c in colors_to_isolate:
+            sub_train_pairs = []
+            for inp, out in current_train_pairs:
+                isolated_inp = keep_only_color(inp, c, bg=0)
+                sub_train_pairs.append((isolated_inp, out))
+
+            sub_sequence = self.search(sub_train_pairs, remaining_time=10.0, is_subtask=True)
+            if sub_sequence:
+                composite_sequence.extend(sub_sequence)
+
+                new_train_pairs = []
+                for inp, out in current_train_pairs:
+                    current_inp = inp.copy()
+                    for name, params in sub_sequence:
+                        func = self.primitive_map.get(name)
+                        if func:
+                            current_inp = func(current_inp, **params)
+                    new_train_pairs.append((current_inp, out))
+                current_train_pairs = new_train_pairs
+
+        if composite_sequence and self._verify_on_all(composite_sequence, train_pairs):
+            return composite_sequence
+
+        return None
+
+    def search(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], remaining_time: Optional[float] = None, is_subtask: bool = False) -> Optional[List[Tuple[str, Dict]]]:
         self.last_beam_scores = []
         self.nodes_explored = 0
         self.depth_reached = 0
@@ -267,7 +303,6 @@ class DSLEnumerator:
 
             candidates.sort(key=lambda x: x.score, reverse=True)
             
-            # Dynamic Beam Pruning: drop candidates scoring below 50% of the best candidate in that beam level
             best_cand_score = candidates[0].score if candidates else 0.0
             threshold = best_cand_score * 0.5
             filtered_candidates = [c for c in candidates if c.score >= threshold]
@@ -300,11 +335,19 @@ class DSLEnumerator:
                 return self._select_best_sequence(valid_sequences, train_pairs)
 
             best_score = beam[0].score
-            if 0.75 <= best_score < 1.0 and len(train_pairs) >= 2:
-                if remaining_time is None or remaining_time > 1800:
-                    llm_patch = self.llm_lifeline.synthesize_correction(train_pairs, beam[0].sequence, self.primitive_map)
-                    if llm_patch is not None:
-                        return llm_patch
+
+            if not is_subtask:
+                # If Beam Search fails, first attempt Problem Decomposition
+                decomp_seq = self._decompose_and_solve(train_pairs)
+                if decomp_seq:
+                    return decomp_seq
+
+                # Finally, attempt LLM Lifeline
+                if 0.75 <= best_score < 1.0 and len(train_pairs) >= 2:
+                    if remaining_time is None or remaining_time > 1800:
+                        llm_patch = self.llm_lifeline.synthesize_correction(train_pairs, beam[0].sequence, self.primitive_map)
+                        if llm_patch is not None:
+                            return llm_patch
 
             return beam[0].sequence
 

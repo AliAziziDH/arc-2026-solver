@@ -4,7 +4,7 @@ from scipy.ndimage import label, find_objects
 
 STRUCTURE_4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
 
-def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], bg: int = 0) -> set:
+def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], test_inputs: List[np.ndarray] = None, bg: int = 0) -> set:
     """Find colors that form completely static semantic structures across all train pairs."""
     static_colors = set(range(1, 10))
     for inp, out in train_pairs:
@@ -17,6 +17,10 @@ def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], bg: 
 
         if not static_colors:
             break
+
+    if static_colors and test_inputs is not None:
+        for test_inp in test_inputs:
+            static_colors &= set(np.unique(test_inp))
 
     return static_colors
 

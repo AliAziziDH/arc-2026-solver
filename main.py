@@ -75,11 +75,12 @@ def apply_with_augmentations(code_str: str, test_in: np.ndarray, train_pairs: Li
         pred, err = safe_execute_solve(code_str, test_in.copy(), dsl_context, timeout_secs=10)
         return pred if err is None else None
 
-def solve_single_task_with_budget(enumerator: DSLEnumerator, train_pairs: List[Tuple[np.ndarray, np.ndarray]], start_wall_time: float) -> Tuple[Optional[List[Tuple[str, Dict]]], float]:
+def solve_single_task_with_budget(enumerator: DSLEnumerator, train_pairs: List[Tuple[np.ndarray, np.ndarray]], test_pairs: List[Tuple[np.ndarray, np.ndarray]], start_wall_time: float) -> Tuple[Optional[List[Tuple[str, Dict]]], float]:
     elapsed_total = time.time() - start_wall_time
     remaining_budget = max(0.0, GLOBAL_TIME_BUDGET - elapsed_total)
     
-    sequence = enumerator.search(train_pairs, remaining_time=remaining_budget)
+    test_inputs = [t[0] for t in test_pairs]
+    sequence = enumerator.search(train_pairs, test_inputs=test_inputs, remaining_time=remaining_budget)
     return sequence, remaining_budget
 
 def main():
@@ -128,7 +129,7 @@ def main():
                 save_checkpoint(completed_tasks)
                 continue
 
-            sequence, remaining_budget = solve_single_task_with_budget(enumerator, train_pairs, start_wall_time)
+            sequence, remaining_budget = solve_single_task_with_budget(enumerator, train_pairs, test_pairs, start_wall_time)
             beam_scores = enumerator.last_beam_scores
             nodes_explored = enumerator.nodes_explored
             depth_reached = enumerator.depth_reached

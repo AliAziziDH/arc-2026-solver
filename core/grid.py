@@ -11,17 +11,19 @@ def canonicalize_colors(grid: np.ndarray, bg: int = 0) -> np.ndarray:
     Enforces SE-RRM Principle: applies Dihedral symmetry group (S4)
     and selects the lexicographically smallest signature for hashing.
     """
-    unique_colors, counts = np.unique(grid, return_counts=True)
-    color_counts = dict(zip(unique_colors, counts))
-
-    if bg in color_counts:
-        del color_counts[bg]
-
-    sorted_colors = sorted(color_counts.items(), key=lambda x: (-x[1], x[0]))
-
     canon = np.full_like(grid, bg, dtype=np.int8)
-    for new_idx, (color, _) in enumerate(sorted_colors, start=1):
-        canon[grid == color] = new_idx
+    color_map = {}
+    next_idx = 1
+
+    h, w = grid.shape
+    for r in range(h):
+        for c in range(w):
+            color = grid[r, c]
+            if color != bg:
+                if color not in color_map:
+                    color_map[color] = next_idx
+                    next_idx += 1
+                canon[r, c] = color_map[color]
 
     # Apply Dihedral S4 Group operations to find the lexicographically smallest
     # byte representation of the canonicalized grid, mathematically minimizing the state.

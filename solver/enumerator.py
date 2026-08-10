@@ -47,6 +47,7 @@ class ProgramNode:
     current_grid: np.ndarray
     score: float = 0.0
     depth: int = 0
+    parent: Optional['ProgramNode'] = None
 
     def __hash__(self):
         return hash(tuple(self.sequence))
@@ -251,6 +252,8 @@ class DSLEnumerator:
         return None
 
     def search(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], remaining_time: Optional[float] = None, is_subtask: bool = False) -> Optional[List[Tuple[str, Dict]]]:
+        import time
+        start_time = time.time()
         self.last_beam_scores = []
         self.nodes_explored = 0
         self.depth_reached = 0
@@ -264,7 +267,8 @@ class DSLEnumerator:
         initial_node = ProgramNode(
             sequence=[],
             current_grid=first_input.copy(),
-            depth=0
+            depth=0,
+            parent=None
         )
         memo.try_enter(first_input, 0)
         beam = [initial_node]
@@ -291,7 +295,8 @@ class DSLEnumerator:
                             new_node = ProgramNode(
                                 sequence=new_seq,
                                 current_grid=next_grid,
-                                depth=depth
+                                depth=depth,
+                                parent=node
                             )
                             # Base score
                             new_node.score = self._score(next_grid, first_output)
@@ -346,9 +351,11 @@ class DSLEnumerator:
 
             if not is_subtask:
                 # If Beam Search fails, first attempt Problem Decomposition
-                decomp_seq = self._decompose_and_solve(train_pairs)
-                if decomp_seq:
-                    return decomp_seq
+                elapsed = time.time() - start_time
+                if elapsed > 40:
+                    decomp_seq = self._decompose_and_solve(train_pairs)
+                    if decomp_seq:
+                        return decomp_seq
 
                 # Finally, attempt LLM Lifeline
                 if 0.75 <= best_score < 1.0 and len(train_pairs) >= 2:

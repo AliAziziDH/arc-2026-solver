@@ -118,55 +118,75 @@ def main():
         print(f"\nProcessing task: {filename}")
         task_start_time = time.time()
         
-        train_pairs, test_pairs = load_task(filepath)
-        if not train_pairs:
-            print("  No training pairs found.")
+        try:
+            train_pairs, test_pairs = load_task(filepath)
+            if not train_pairs:
+                print("  No training pairs found.")
+                duration = time.time() - task_start_time
+                logger.log_task_result(task_id, False, [], [], [], test_pairs, duration, 0, 0)
+                completed_tasks.add(task_id)
+                save_checkpoint(completed_tasks)
+                continue
+
+            sequence, remaining_budget = solve_single_task_with_budget(enumerator, train_pairs, start_wall_time)
+            beam_scores = enumerator.last_beam_scores
+            nodes_explored = enumerator.nodes_explored
+            depth_reached = enumerator.depth_reached
             duration = time.time() - task_start_time
+
+            if sequence is None:
+                print("  No program found.")
+                logger.log_task_result(task_id, False, [], beam_scores, train_pairs, test_pairs, duration, nodes_explored, depth_reached)
+                completed_tasks.add(task_id)
+                save_checkpoint(completed_tasks)
+                continue
+
+            print(f"  Found program sequence: {sequence}")
+            lambda_str = enumerator.compile_to_python(sequence)
+            print(f"  Compiled DSL lambda: {lambda_str}")
+
+            success = True
+            code_str = f"def solve():\n    f = {lambda_str}\n    return f(input_grid.copy())"
+
+            for idx, (test_in, test_out) in enumerate(test_pairs):
+                pred = apply_with_augmentations(code_str, test_in.copy(), train_pairs, dsl_context)
+                if pred is None:
+                    print(f"  Test {idx}: Error during execution")
+                    success = False
+                else:
+                    match = np.array_equal(pred, test_out)
+                    print(f"  Test {idx}: Match = {match}")
+                    if not match:
+                        success = False
+                        print(f"    Predicted:\n{pred}")
+                        print(f"    Expected:\n{test_out}")
+
+            logger.log_task_result(task_id, success, sequence, beam_scores, train_pairs, test_pairs, duration, nodes_explored, depth_reached)
+            completed_tasks.add(task_id)
+            save_checkpoint(completed_tasks)
+
+            task_count += 1
+        except Exception as e:
+            print(f"  FATAL ERROR on {task_id}: {e}")
+            duration = time.time() - task_start_time
+            # Try to get test pairs for fallback, if they were loaded
+            if 'test_pairs' not in locals():
+                try:
+                    _, test_pairs = load_task(filepath)
+                except Exception:
+                    test_pairs = [(np.array([[0]], dtype=np.int8), np.array([[0]], dtype=np.int8))]
+
             logger.log_task_result(task_id, False, [], [], [], test_pairs, duration, 0, 0)
             completed_tasks.add(task_id)
             save_checkpoint(completed_tasks)
-            continue
+        finally:
+            gc.collect()
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             
-        sequence, remaining_budget = solve_single_task_with_budget(enumerator, train_pairs, start_wall_time)
-        beam_scores = enumerator.last_beam_scores
-        nodes_explored = enumerator.nodes_explored
-        depth_reached = enumerator.depth_reached
-        duration = time.time() - task_start_time
-
-        if sequence is None:
-            print("  No program found.")
-            logger.log_task_result(task_id, False, [], beam_scores, train_pairs, test_pairs, duration, nodes_explored, depth_reached)
-            completed_tasks.add(task_id)
-            save_checkpoint(completed_tasks)
-            continue
-            
-        print(f"  Found program sequence: {sequence}")
-        lambda_str = enumerator.compile_to_python(sequence)
-        print(f"  Compiled DSL lambda: {lambda_str}")
-        
-        success = True
-        code_str = f"def solve():\n    f = {lambda_str}\n    return f(input_grid.copy())"
-        
-        for idx, (test_in, test_out) in enumerate(test_pairs):
-            pred = apply_with_augmentations(code_str, test_in.copy(), train_pairs, dsl_context)
-            if pred is None:
-                print(f"  Test {idx}: Error during execution")
-                success = False
-            else:
-                match = np.array_equal(pred, test_out)
-                print(f"  Test {idx}: Match = {match}")
-                if not match:
-                    success = False
-                    print(f"    Predicted:\n{pred}")
-                    print(f"    Expected:\n{test_out}")
-
-        logger.log_task_result(task_id, success, sequence, beam_scores, train_pairs, test_pairs, duration, nodes_explored, depth_reached)
-        completed_tasks.add(task_id)
-        save_checkpoint(completed_tasks)
-
-        task_count += 1
-        if task_count % 10 == 0:
-            force_memory_cleanup()
+            if task_count % 10 == 0 and task_count > 0:
+                force_memory_cleanup()
 
 if __name__ == '__main__':
     main()

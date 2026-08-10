@@ -11,7 +11,7 @@ from solver.sandbox import safe_execute_solve, IPyBoxSandbox_run
 from core.grid import get_object_metadata
 
 class LLMSurgicalLifeline:
-    def __init__(self, model_id: str = "Qwen/Qwen2.5-Coder-7B-Instruct"):
+    def __init__(self, model_id: str = "/kaggle/input/qwen2.5-coder-7b-instruct"):
         self.model_id = model_id
         self._model = None
         self._tokenizer = None
@@ -206,7 +206,7 @@ Target:
 
 {candidates_block}
 
-Evaluate the logical consistency and execution trace of each candidate. Synthesize their correct components into a single, flawless Python function named `solve()` that takes `input_grid` and returns the correct 2D numpy array.
+Acting as a consensus judge, rigorously evaluate and compare the logical consistency and execution trace of each candidate script. Synthesize their correct components into a single, flawless Python function named `solve()` that takes `input_grid` and returns the correct 2D numpy array.
 Return ONLY executable Python code inside a markdown code block.
 """
 

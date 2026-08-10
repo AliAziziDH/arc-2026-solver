@@ -7,7 +7,7 @@ import json
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from solver.sandbox import safe_execute_solve, run_code_with_feedback
+from solver.sandbox import safe_execute_solve, IPyBoxSandbox_run
 from core.grid import get_object_metadata
 
 class LLMSurgicalLifeline:
@@ -26,12 +26,18 @@ class LLMSurgicalLifeline:
                 bnb_4bit_quant_type="nf4",
                 bnb_4bit_use_double_quant=True
             )
-            self._tokenizer = AutoTokenizer.from_pretrained(self.model_id, trust_remote_code=True)
+            self._tokenizer = AutoTokenizer.from_pretrained(
+                self.model_id,
+                trust_remote_code=True,
+                local_files_only=True
+            )
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.model_id,
                 quantization_config=bnb_config,
                 device_map="auto",
-                trust_remote_code=True
+                trust_remote_code=True,
+                local_files_only=True,
+                low_cpu_mem_usage=True
             )
             return True
         except Exception as e:
@@ -88,6 +94,8 @@ Return ONLY executable Python code inside a markdown code block.
         ]
 
         wait_time = 5.0
+        candidate_scripts = []
+
         for attempt in range(max_retries):
             try:
                 for repl_iter in range(max_repl_iterations):
@@ -115,13 +123,17 @@ Return ONLY executable Python code inside a markdown code block.
                         continue
 
                     # Evaluate via stateful REPL sandbox
-                    feedback = run_code_with_feedback(code_str, train_pairs, dsl_context, timeout_secs=5)
+                    feedback = IPyBoxSandbox_run(code_str, train_pairs, dsl_context, timeout_secs=2.0)
 
                     if feedback["success"]:
                         return [('llm_custom_patch', {'code_str': code_str})]
                     else:
                         error_msg = feedback["error"]
                         mismatches = feedback["mismatches"]
+
+                        if error_msg is None and mismatches:
+                            # It ran without throwing an error but had mismatches
+                            candidate_scripts.append(code_str)
 
                         feedback_prompt = "The code did not pass all train pairs.\n"
                         if error_msg:
@@ -135,6 +147,11 @@ Return ONLY executable Python code inside a markdown code block.
 
                         feedback_prompt += "Please correct the code."
                         messages.append({"role": "user", "content": feedback_prompt})
+
+                        # Apply Sliding-Window token eviction to preserve memory
+                        if len(messages) > 6:
+                            # Keep first 2 (system, initial prompt) and last 4 (last 2 interactions)
+                            messages = messages[:2] + messages[-4:]
 
                         # GC after evaluating feedback to keep memory down in iterative loop
                         gc.collect()
@@ -154,6 +171,79 @@ Return ONLY executable Python code inside a markdown code block.
                     print(f"LLM generation attempt {attempt + 1} error: {e}")
                     time.sleep(2.0)
                     continue
+
+        # If we exhausted retries and have collected scripts, try holistic judge
+        if candidate_scripts:
+            # deduplicate
+            candidate_scripts = list(set(candidate_scripts))
+            return self.holistic_judge(candidate_scripts, train_pairs, dsl_context)
+
+        return None
+
+    def holistic_judge(self, candidate_scripts: List[str], train_pairs: List[Tuple[np.ndarray, np.ndarray]], dsl_context: dict) -> Optional[List[Tuple[str, Dict]]]:
+        if not candidate_scripts:
+            return None
+
+        print(f"[LLM] Triggering Holistic Judge with {len(candidate_scripts)} candidate scripts...")
+
+        inp, out = train_pairs[0]
+        inp_str = self._grid_to_str(inp)
+        out_str = self._grid_to_str(out)
+
+        candidates_block = ""
+        for i, script in enumerate(candidate_scripts[:5]): # cap at 5 scripts to prevent context overflow
+            candidates_block += f"=== Candidate Script {i+1} ===\n```python\n{script}\n```\n\n"
+
+        prompt = f"""You are an elite AI Architect acting as a Holistic Judge.
+You are given an ARC-AGI input and output grid (Train Pair 0), and a list of candidate Python scripts.
+All of these scripts executed without crashing, but failed to produce the exact target grid.
+
+Input:
+{inp_str}
+
+Target:
+{out_str}
+
+{candidates_block}
+
+Evaluate the logical consistency and execution trace of each candidate. Synthesize their correct components into a single, flawless Python function named `solve()` that takes `input_grid` and returns the correct 2D numpy array.
+Return ONLY executable Python code inside a markdown code block.
+"""
+
+        messages = [
+            {"role": "system", "content": "You are a holistic judge synthesising the best approach from multiple flawed Python scripts."},
+            {"role": "user", "content": prompt}
+        ]
+
+        try:
+            text = self._tokenizer.apply_chat_template(
+                messages,
+                tokenize=False,
+                add_generation_prompt=True
+            )
+
+            inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
+
+            outputs = self._model.generate(
+                **inputs,
+                max_new_tokens=512,
+                temperature=0.1,
+                do_sample=True
+            )
+            response_text = self._tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
+
+            code_str = self._extract_code(response_text)
+            if code_str:
+                feedback = IPyBoxSandbox_run(code_str, train_pairs, dsl_context, timeout_secs=2.0)
+                if feedback["success"]:
+                    return [('llm_custom_patch', {'code_str': code_str})]
+
+        except Exception as e:
+            print(f"[LLM] Holistic Judge error: {e}")
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
         return None
 

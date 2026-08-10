@@ -8,8 +8,8 @@ def canonicalize_colors(grid: np.ndarray, bg: int = 0) -> np.ndarray:
     """
     Normalizes colors in the grid so that identical spatial configurations
     with different colors map to the same grid representation.
-    Background is preserved. Colors are assigned IDs 1, 2, ... based on
-    their frequency (most frequent gets 1) to be deterministic.
+    Enforces SE-RRM Principle: applies Dihedral symmetry group (S4)
+    and selects the lexicographically smallest signature for hashing.
     """
     unique_colors, counts = np.unique(grid, return_counts=True)
     color_counts = dict(zip(unique_colors, counts))
@@ -19,12 +19,36 @@ def canonicalize_colors(grid: np.ndarray, bg: int = 0) -> np.ndarray:
 
     sorted_colors = sorted(color_counts.items(), key=lambda x: (-x[1], x[0]))
 
-    out = np.full_like(grid, bg, dtype=np.int8)
+    canon = np.full_like(grid, bg, dtype=np.int8)
     for new_idx, (color, _) in enumerate(sorted_colors, start=1):
-        out[grid == color] = new_idx
+        canon[grid == color] = new_idx
 
-    return out
+    # Apply Dihedral S4 Group operations to find the lexicographically smallest
+    # byte representation of the canonicalized grid, mathematically minimizing the state.
 
+    variants = [
+        canon,
+        np.rot90(canon, k=1),
+        np.rot90(canon, k=2),
+        np.rot90(canon, k=3),
+        np.fliplr(canon),
+        np.flipud(canon),
+        np.rot90(np.fliplr(canon), k=1),
+        np.rot90(np.flipud(canon), k=1)
+    ]
+
+    best_variant = canon
+    best_hash = canon.tobytes()
+
+    for v in variants:
+        # Some flips/rotations return non-contiguous arrays, need to copy to contiguous C order
+        v_contig = np.ascontiguousarray(v, dtype=np.int8)
+        v_hash = v_contig.tobytes()
+        if v_hash < best_hash:
+            best_hash = v_hash
+            best_variant = v_contig
+
+    return best_variant
 
 def get_object_metadata(grid: np.ndarray, bg: int = 0) -> List[Dict]:
     """

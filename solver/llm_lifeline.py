@@ -52,6 +52,47 @@ class LLMSurgicalLifeline:
     def _get_diff_crop(self, pred: np.ndarray, target: np.ndarray) -> str:
         return f"Predicted:\n{self._grid_to_str(pred)}\nTarget:\n{self._grid_to_str(target)}"
 
+    def generate_mutated_test_pairs(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]]) -> List[Tuple[np.ndarray, np.ndarray]]:
+        mutated_pairs = []
+        for inp, out in train_pairs:
+            # 1. Bijective color mapping (preserve bg=0)
+            colors = np.unique(np.concatenate([inp, out]))
+            fg_colors = [c for c in colors if c != 0]
+            if fg_colors:
+                shuffled_fg = fg_colors.copy()
+                random.shuffle(shuffled_fg)
+                color_map = {c: s for c, s in zip(fg_colors, shuffled_fg)}
+                color_map[0] = 0
+
+                # Apply map to input
+                new_inp = np.zeros_like(inp)
+                for c in np.unique(inp):
+                    if c in color_map:
+                        new_inp[inp == c] = color_map[c]
+
+                # Apply map to output
+                new_out = np.zeros_like(out)
+                for c in np.unique(out):
+                    if c in color_map:
+                        new_out[out == c] = color_map[c]
+            else:
+                new_inp, new_out = inp.copy(), out.copy()
+
+            # 2. Random Dihedral S4 geometric transform
+            k_rot = random.choice([0, 1, 2, 3])
+            do_flip = random.choice([True, False])
+
+            m_inp = np.rot90(new_inp, k=k_rot)
+            m_out = np.rot90(new_out, k=k_rot)
+
+            if do_flip:
+                m_inp = np.fliplr(m_inp)
+                m_out = np.fliplr(m_out)
+
+            mutated_pairs.append((np.ascontiguousarray(m_inp), np.ascontiguousarray(m_out)))
+
+        return mutated_pairs
+
     def synthesize_correction(
         self,
         train_pairs: List[Tuple[np.ndarray, np.ndarray]],
@@ -122,11 +163,25 @@ Return ONLY executable Python code inside a markdown code block.
                         messages.append({"role": "user", "content": "No code block found. Return ONLY executable Python code inside a markdown code block."})
                         continue
 
-                    # Evaluate via stateful REPL sandbox
+                    # Evaluate via stateful REPL sandbox on original pairs
                     feedback = IPyBoxSandbox_run(code_str, train_pairs, dsl_context, timeout_secs=2.0)
 
                     if feedback["success"]:
-                        return [('llm_custom_patch', {'code_str': code_str})]
+                        # Anti-Hardcoding Validation
+                        mutated_pairs = self.generate_mutated_test_pairs(train_pairs)
+                        mutated_feedback = IPyBoxSandbox_run(code_str, mutated_pairs, dsl_context, timeout_secs=2.0)
+
+                        if mutated_feedback["success"]:
+                            return [('llm_custom_patch', {'code_str': code_str})]
+                        else:
+                            # Program overfitted to static coords/colors
+                            feedback_prompt = "CRITICAL ERROR: Overfitting/Hardcoding detected! Your program successfully solved the static training examples but failed to generalize when those same examples underwent geometric/color mutations. Rewrite your algorithm using general programmatic logic rather than hardcoded coordinate indexes or static grid values."
+                            messages.append({"role": "user", "content": feedback_prompt})
+                            if len(messages) > 6:
+                                messages = messages[:2] + messages[-4:]
+                            gc.collect()
+                            torch.cuda.empty_cache()
+                            continue
                     else:
                         error_msg = feedback["error"]
                         mismatches = feedback["mismatches"]

@@ -6,7 +6,7 @@ from core.primitives import (
     replace_color, keep_only_color, remove_color, extract_largest,
     extract_smallest, gravity_down, fill_holes, tile_to_size, pad_to_size
 )
-from core.grid import get_object_metadata
+from core.grid import get_object_metadata, find_static_landmarks
 from solver.memo import StateMemo
 from solver.llm_lifeline import LLMSurgicalLifeline
 
@@ -223,30 +223,28 @@ class DSLEnumerator:
         if not colors_to_isolate:
             return None
 
-        composite_sequence = []
-        current_train_pairs = [(inp.copy(), out.copy()) for inp, out in train_pairs]
+        sub_sequences = []
+        # Find static structures first to protect them in blending
+        static_colors = find_static_landmarks(train_pairs)
 
         for c in colors_to_isolate:
             sub_train_pairs = []
-            for inp, out in current_train_pairs:
+            for inp, out in train_pairs:
                 isolated_inp = keep_only_color(inp, c, bg=0)
                 sub_train_pairs.append((isolated_inp, out))
 
             sub_sequence = self.search(sub_train_pairs, remaining_time=10.0, is_subtask=True)
             if sub_sequence:
-                composite_sequence.extend(sub_sequence)
+                sub_sequences.append(sub_sequence)
 
-                new_train_pairs = []
-                for inp, out in current_train_pairs:
-                    current_inp = inp.copy()
-                    for name, params in sub_sequence:
-                        func = self.primitive_map.get(name)
-                        if func:
-                            current_inp = func(current_inp, **params)
-                    new_train_pairs.append((current_inp, out))
-                current_train_pairs = new_train_pairs
+        if not sub_sequences:
+            return None
 
-        if composite_sequence and self._verify_on_all(composite_sequence, train_pairs):
+        # Custom macro to encode this recomposition
+        # We store the sequences so that our compile_to_python and verification can handle it.
+        composite_sequence = [('ladder_recompose', {'sub_sequences': sub_sequences, 'static_colors': static_colors})]
+
+        if self._verify_on_all(composite_sequence, train_pairs):
             return composite_sequence
 
         return None
@@ -262,7 +260,9 @@ class DSLEnumerator:
             return None
 
         first_input, first_output = train_pairs[0]
-        memo = StateMemo()
+
+        static_colors = find_static_landmarks(train_pairs)
+        memo = StateMemo(static_colors=static_colors)
 
         initial_node = ProgramNode(
             sequence=[],
@@ -397,6 +397,44 @@ class DSLEnumerator:
         for inp, out in train_pairs:
             current = inp.copy()
             for name, params in sequence:
+                if name == 'ladder_recompose':
+                    # LADDER Recomposition blending logic
+                    layers = []
+                    sub_sequences = params['sub_sequences']
+                    static_colors = params['static_colors']
+                    for sub_seq in sub_sequences:
+                        layer_current = inp.copy()
+                        for sub_name, sub_params in sub_seq:
+                            func = self.primitive_map.get(sub_name)
+                            if func:
+                                layer_current = func(layer_current, **sub_params)
+                        layers.append(layer_current)
+
+                    if not layers:
+                        continue
+
+                    # Blend layers
+                    th, tw = layers[0].shape
+                    blended = np.zeros((th, tw), dtype=np.int8)
+                    for r in range(th):
+                        for c in range(tw):
+                            pixel_colors = [layer[r, c] for layer in layers if r < layer.shape[0] and c < layer.shape[1] and layer[r, c] != 0]
+                            if not pixel_colors:
+                                blended[r, c] = 0
+                                continue
+
+                            # Priority 1: Static structures
+                            static_present = [pc for pc in pixel_colors if pc in static_colors]
+                            if static_present:
+                                blended[r, c] = static_present[0]
+                                continue
+
+                            # Priority 2: Highest frequency collision resolution
+                            from collections import Counter
+                            blended[r, c] = Counter(pixel_colors).most_common(1)[0][0]
+                    current = blended
+                    continue
+
                 func = self.primitive_map.get(name)
                 if func is None and name == 'llm_custom_patch':
                     continue
@@ -412,6 +450,50 @@ class DSLEnumerator:
 
         if len(sequence) == 1 and sequence[0][0] == 'llm_custom_patch':
             return f"lambda grid: (__import__('numpy').ascontiguousarray(__import__('numpy').clip(locals().get('solve', lambda: grid)(), 0, 9), dtype=__import__('numpy').int8))"
+
+        if len(sequence) == 1 and sequence[0][0] == 'ladder_recompose':
+            sub_sequences = sequence[0][1]['sub_sequences']
+            static_colors = sequence[0][1]['static_colors']
+
+            sub_funcs_code = []
+            for idx, sub_seq in enumerate(sub_sequences):
+                sub_code = "g"
+                for name, params in reversed(sub_seq):
+                    if params:
+                        args_str = ", ".join([f"{k}={v}" for k, v in params.items()])
+                        sub_code = f"{name}({sub_code}, {args_str})"
+                    else:
+                        sub_code = f"{name}({sub_code})"
+                sub_funcs_code.append(f"lambda g: {sub_code}")
+
+            static_set_str = str(static_colors)
+
+            blender_code = f"""
+def ladder_blend(grid):
+    import numpy as np
+    from collections import Counter
+    funcs = [{', '.join(sub_funcs_code)}]
+    static_colors = {static_set_str}
+
+    layers = [f(grid.copy()) for f in funcs]
+    if not layers: return grid.copy()
+
+    th, tw = layers[0].shape
+    blended = np.zeros((th, tw), dtype=np.int8)
+    for r in range(th):
+        for c in range(tw):
+            pixel_colors = [layer[r, c] for layer in layers if r < layer.shape[0] and c < layer.shape[1] and layer[r, c] != 0]
+            if not pixel_colors:
+                blended[r, c] = 0
+                continue
+            static_present = [pc for pc in pixel_colors if pc in static_colors]
+            if static_present:
+                blended[r, c] = static_present[0]
+            else:
+                blended[r, c] = Counter(pixel_colors).most_common(1)[0][0]
+    return blended
+"""
+            return f"(__import__('sys').modules[__name__].__dict__.update({{'ladder_blend': exec({repr(blender_code)}) or locals()['ladder_blend']}}) or ladder_blend)"
 
         code = "grid"
         for name, params in reversed(sequence):

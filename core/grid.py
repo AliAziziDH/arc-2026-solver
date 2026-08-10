@@ -1,19 +1,45 @@
 import numpy as np
-from typing import List, Dict
+from typing import List, Dict, Tuple
 from scipy.ndimage import label, find_objects
 
 STRUCTURE_4 = np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]], dtype=bool)
 
-def canonicalize_colors(grid: np.ndarray, bg: int = 0) -> np.ndarray:
+def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], bg: int = 0) -> set:
+    """Find colors that form completely static semantic structures across all train pairs."""
+    static_colors = set(range(1, 10))
+    for inp, out in train_pairs:
+        if inp.shape != out.shape:
+            return set()
+
+        static_mask = (inp == out) & (inp != bg)
+        static_colors_in_pair = set(np.unique(inp[static_mask]))
+        static_colors &= static_colors_in_pair
+
+        if not static_colors:
+            break
+
+    return static_colors
+
+def canonicalize_colors(grid: np.ndarray, bg: int = 0, static_colors: set = None) -> np.ndarray:
     """
     Normalizes colors in the grid so that identical spatial configurations
     with different colors map to the same grid representation.
     Enforces SE-RRM Principle: applies Dihedral symmetry group (S4)
     and selects the lexicographically smallest signature for hashing.
+    Preserves semantic static colors.
     """
+    if static_colors is None:
+        static_colors = set()
+
     canon = np.full_like(grid, bg, dtype=np.int8)
     color_map = {}
-    next_idx = 1
+
+    # Assign predefined colors for protected static landmarks
+    for c in static_colors:
+        color_map[c] = c
+
+    # Start assigning new indices from 10 to avoid collisions with 1-9 protected colors
+    next_idx = 10
 
     h, w = grid.shape
     for r in range(h):

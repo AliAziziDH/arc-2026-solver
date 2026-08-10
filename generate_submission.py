@@ -8,6 +8,7 @@ import os
 import gc
 import json
 import time
+import torch
 import numpy as np
 from typing import List, Tuple, Optional
 
@@ -106,77 +107,86 @@ def main():
 
         try:
             train_pairs, test_pairs = load_task(filepath)
-        except Exception as e:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: ERROR loading task: {e}")
-            # Output empty fallback for each test pair
-            for _ in range(max(1, len(test_pairs) if 'test_pairs' in locals() else 1)):
-                submission_data[task_id].append({"attempt_1": [[0]], "attempt_2": [[0]]})
-            stats["failed"] += 1
-            continue
 
-        if not train_pairs:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: No training pairs, skipping")
-            for t_in, _ in test_pairs:
-                default_pred = grid_to_list(t_in)
-                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
-            stats["failed"] += 1
-            continue
+            if not train_pairs:
+                print(f"[{idx+1}/{len(task_files)}] {task_id}: No training pairs, skipping")
+                for t_in, _ in test_pairs:
+                    default_pred = grid_to_list(t_in)
+                    submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
+                stats["failed"] += 1
+                continue
 
-        # --- Run DSL beam search with a strict time budget ---
-        start = time.time()
-        sequence = None
-        try:
-            sequence = enumerator.search(train_pairs, remaining_time=PER_TASK_TIME_BUDGET)
-        except Exception as e:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: Search error: {e}")
+            # --- Run DSL beam search with a strict time budget ---
+            start = time.time()
             sequence = None
+            try:
+                sequence = enumerator.search(train_pairs, remaining_time=PER_TASK_TIME_BUDGET)
+            except Exception as e:
+                print(f"[{idx+1}/{len(task_files)}] {task_id}: Search error: {e}")
+                sequence = None
 
-        elapsed = time.time() - start
+            elapsed = time.time() - start
 
-        if sequence is None:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: No program found ({elapsed:.2f}s)")
-            for t_in, _ in test_pairs:
-                default_pred = grid_to_list(t_in)
-                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
-            stats["no_program"] += 1
-            continue
+            if sequence is None:
+                print(f"[{idx+1}/{len(task_files)}] {task_id}: No program found ({elapsed:.2f}s)")
+                for t_in, _ in test_pairs:
+                    default_pred = grid_to_list(t_in)
+                    submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
+                stats["no_program"] += 1
+                continue
 
-        # Compile the program to executable Python
-        try:
+            # Compile the program to executable Python
             lambda_str = enumerator.compile_to_python(sequence)
             code_str = f"def solve():\n    f = {lambda_str}\n    return f(input_grid.copy())"
-        except Exception as e:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: Compile error: {e}")
-            for t_in, _ in test_pairs:
-                default_pred = grid_to_list(t_in)
-                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
-            stats["failed"] += 1
-            continue
 
-        # Apply program to each test input
-        task_solved = True
-        for t_idx, (test_in, test_out) in enumerate(test_pairs):
-            pred = apply_program(code_str, test_in, dsl_context)
-            if pred is None:
-                default_pred = grid_to_list(test_in)
-                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
-                task_solved = False
-            else:
-                pred_list = grid_to_list(pred)
-                submission_data[task_id].append({"attempt_1": pred_list, "attempt_2": pred_list})
-                if not np.array_equal(pred, test_out):
+            # Apply program to each test input
+            task_solved = True
+            for t_idx, (test_in, test_out) in enumerate(test_pairs):
+                pred = apply_program(code_str, test_in, dsl_context)
+                if pred is None:
+                    default_pred = grid_to_list(test_in)
+                    submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
                     task_solved = False
+                else:
+                    pred_list = grid_to_list(pred)
+                    submission_data[task_id].append({"attempt_1": pred_list, "attempt_2": pred_list})
+                    if not np.array_equal(pred, test_out):
+                        task_solved = False
 
-        if task_solved:
-            stats["solved"] += 1
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: SOLVED ({elapsed:.2f}s)")
-        else:
+            if task_solved:
+                stats["solved"] += 1
+                print(f"[{idx+1}/{len(task_files)}] {task_id}: SOLVED ({elapsed:.2f}s)")
+            else:
+                stats["failed"] += 1
+                print(f"[{idx+1}/{len(task_files)}] {task_id}: processed ({elapsed:.2f}s)")
+
+        except Exception as global_err:
+            print(f"[{idx+1}/{len(task_files)}] {task_id}: FATAL ERROR - {global_err}")
+            # Universal fallback for this task
+            # Attempt to re-load just to get the test pairs if they aren't loaded
+            try:
+                if 'test_pairs' not in locals():
+                    _, test_pairs = load_task(filepath)
+            except:
+                test_pairs = [(np.array([[0]], dtype=np.int8), np.array([[0]], dtype=np.int8))]
+
+            # Ensure the output is cleared and properly pushed
+            submission_data[task_id] = []
+            for t_in, _ in test_pairs:
+                try:
+                    default_pred = grid_to_list(t_in)
+                except:
+                    default_pred = [[0]]
+                submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
             stats["failed"] += 1
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: processed ({elapsed:.2f}s)")
 
-        # Periodic memory cleanup
-        if (idx + 1) % 20 == 0:
-            force_memory_cleanup()
+        finally:
+            # Memory governance inside the loop
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if (idx + 1) % 20 == 0:
+                force_memory_cleanup()
 
     # -----------------------------------------------------------------------
     # Write submission.json in Kaggle format

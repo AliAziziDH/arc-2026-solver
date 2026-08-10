@@ -1,51 +1,3 @@
-import numpy as np
-import multiprocessing as mp
-
-def _worker(code_str, input_grid, dsl_context, q):
-    try:
-        loc = {
-            **dsl_context,
-            'solve': None,
-            'input_grid': input_grid
-        }
-        exec(code_str, loc)
-        solve_func = loc['solve']
-        if solve_func is None:
-            q.put((None, "Failed to find solve function"))
-            return
-        output_grid = solve_func()
-        if not isinstance(output_grid, np.ndarray):
-            q.put((None, "Output is not a numpy array"))
-            return
-        output_grid = np.clip(output_grid, 0, 9).astype(np.int8)
-        output_grid = np.ascontiguousarray(output_grid)
-        q.put((output_grid, None))
-    except NameError as e:
-        q.put((None, f"NameError: {str(e)} - Missing primitive or variable"))
-    except Exception as e:
-        q.put((None, str(e)))
-
-def safe_execute_solve(code_str: str, input_grid: np.ndarray, dsl_context: dict, timeout_secs: int = 5):
-    # Use 'fork' context on Linux for fast process creation (no re-import of modules)
-    try:
-        ctx = mp.get_context('fork')
-    except ValueError:
-        ctx = mp.get_context('spawn')
-    q = ctx.Queue()
-    p = ctx.Process(target=_worker, args=(code_str, input_grid, dsl_context, q))
-    p.start()
-    p.join(timeout=timeout_secs)
-    
-    if p.is_alive():
-        p.terminate()
-        p.join()
-        return None, "Timeout exceeded"
-    
-    if q.empty():
-        return None, "No output returned"
-    
-    res, err = q.get()
-    return res, err
 import multiprocessing as mp
 import numpy as np
 
@@ -89,7 +41,7 @@ def _run_with_feedback_worker(code_str, train_pairs, dsl_context, q):
     except Exception as e:
         q.put(({"success": False, "error": str(e), "mismatches": []}, None))
 
-def run_code_with_feedback(code_str: str, train_pairs: list, dsl_context: dict, timeout_secs: int = 5) -> dict:
+def IPyBoxSandbox_run(code_str: str, train_pairs: list, dsl_context: dict, timeout_secs: float = 2.0) -> dict:
     try:
         ctx = mp.get_context('fork')
     except ValueError:
@@ -109,3 +61,45 @@ def run_code_with_feedback(code_str: str, train_pairs: list, dsl_context: dict, 
 
     res, _ = q.get()
     return res
+
+def safe_execute_solve(code_str: str, input_grid: np.ndarray, dsl_context: dict, timeout_secs: int = 5):
+    try:
+        ctx = mp.get_context('fork')
+    except ValueError:
+        ctx = mp.get_context('spawn')
+    q = ctx.Queue()
+
+    def _worker_single(c_str, i_grid, d_ctx, qu):
+        try:
+            loc = {**d_ctx, 'solve': None, 'input_grid': i_grid}
+            exec(c_str, loc)
+            solve_func = loc['solve']
+            if solve_func is None:
+                qu.put((None, "Failed to find solve function"))
+                return
+            out_grid = solve_func()
+            if not isinstance(out_grid, np.ndarray):
+                qu.put((None, "Output is not a numpy array"))
+                return
+            out_grid = np.clip(out_grid, 0, 9).astype(np.int8)
+            out_grid = np.ascontiguousarray(out_grid)
+            qu.put((out_grid, None))
+        except NameError as e:
+            qu.put((None, f"NameError: {str(e)} - Missing primitive or variable"))
+        except Exception as e:
+            qu.put((None, str(e)))
+
+    p = ctx.Process(target=_worker_single, args=(code_str, input_grid, dsl_context, q))
+    p.start()
+    p.join(timeout=timeout_secs)
+
+    if p.is_alive():
+        p.terminate()
+        p.join()
+        return None, "Timeout exceeded"
+
+    if q.empty():
+        return None, "No output returned"
+
+    res, err = q.get()
+    return res, err

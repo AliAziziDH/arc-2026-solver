@@ -293,7 +293,13 @@ class DSLEnumerator:
                                 current_grid=next_grid,
                                 depth=depth
                             )
+                            # Base score
                             new_node.score = self._score(next_grid, first_output)
+
+                            # Heuristic bonus prioritizing fewer active colors
+                            active_colors = len(np.unique(next_grid))
+                            new_node.score += 0.05 * (1.0 / max(1, active_colors))
+
                             candidates.append(new_node)
                         except Exception:
                             continue
@@ -311,7 +317,9 @@ class DSLEnumerator:
             self.last_beam_scores = [n.score for n in beam]
 
             best_node = beam[0] if beam else candidates[0]
-            if best_node.score == 1.0:
+
+            # Check base score without the heuristic for exact matches
+            if self._score(best_node.current_grid, first_output) == 1.0:
                 fixed_seq = self._verify_and_harmonize(best_node.sequence, train_pairs)
                 if fixed_seq is not None:
                     valid_sequences.append(fixed_seq)

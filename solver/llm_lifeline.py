@@ -2,10 +2,13 @@ import os
 import time
 import random
 import torch
+import gc
+import json
 import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from solver.sandbox import safe_execute_solve
+from solver.sandbox import safe_execute_solve, run_code_with_feedback
+from core.grid import get_object_metadata
 
 class LLMSurgicalLifeline:
     def __init__(self, model_id: str = "Qwen/Qwen2.5-Coder-7B-Instruct"):
@@ -48,7 +51,8 @@ class LLMSurgicalLifeline:
         train_pairs: List[Tuple[np.ndarray, np.ndarray]],
         partial_sequence: List[Tuple[str, Dict]],
         dsl_context: Dict[str, Any],
-        max_retries: int = 10
+        max_retries: int = 10,
+        max_repl_iterations: int = 3
     ) -> Optional[List[Tuple[str, Dict]]]:
         if not self._load_model():
             return None
@@ -64,10 +68,15 @@ class LLMSurgicalLifeline:
             return None
 
         diff_str = self._get_diff_crop(current, out)
+        obj_metadata = get_object_metadata(current)
+        obj_meta_str = json.dumps(obj_metadata, indent=2)
 
         prompt = f"""You are an elite ARC-AGI expert programmer. A partial DSL program produced an incorrect grid.
 Train Pair 0 Mismatch:
 {diff_str}
+
+Train Pair 0 Predicted Object Metadata:
+{obj_meta_str}
 
 Write a Python function named `solve()` that takes `input_grid` (a 2D numpy array) and returns the correct output 2D numpy array. You can use numpy operations and helper functions.
 Return ONLY executable Python code inside a markdown code block.
@@ -81,35 +90,56 @@ Return ONLY executable Python code inside a markdown code block.
         wait_time = 5.0
         for attempt in range(max_retries):
             try:
-                text = self._tokenizer.apply_chat_template(
-                    messages,
-                    tokenize=False,
-                    add_generation_prompt=True
-                )
+                for repl_iter in range(max_repl_iterations):
+                    text = self._tokenizer.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
 
-                inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
-                
-                outputs = self._model.generate(
-                    **inputs,
-                    max_new_tokens=512,
-                    temperature=0.2 + (0.05 * attempt),
-                    do_sample=True
-                )
-                response_text = self._tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
-                
-                code_str = self._extract_code(response_text)
-                if not code_str:
-                    continue
+                    inputs = self._tokenizer([text], return_tensors="pt").to(self._model.device)
 
-                success = True
-                for inp_t, out_t in train_pairs:
-                    pred, err = safe_execute_solve(code_str, inp_t.copy(), dsl_context, timeout_secs=5)
-                    if err or not np.array_equal(pred, out_t):
-                        success = False
-                        break
+                    outputs = self._model.generate(
+                        **inputs,
+                        max_new_tokens=512,
+                        temperature=0.2 + (0.05 * attempt),
+                        do_sample=True
+                    )
+                    response_text = self._tokenizer.batch_decode(outputs[:, inputs.input_ids.shape[1]:], skip_special_tokens=True)[0]
 
-                if success:
-                    return [('llm_custom_patch', {'code_str': code_str})]
+                    code_str = self._extract_code(response_text)
+                    messages.append({"role": "assistant", "content": response_text})
+
+                    if not code_str:
+                        messages.append({"role": "user", "content": "No code block found. Return ONLY executable Python code inside a markdown code block."})
+                        continue
+
+                    # Evaluate via stateful REPL sandbox
+                    feedback = run_code_with_feedback(code_str, train_pairs, dsl_context, timeout_secs=5)
+
+                    if feedback["success"]:
+                        return [('llm_custom_patch', {'code_str': code_str})]
+                    else:
+                        error_msg = feedback["error"]
+                        mismatches = feedback["mismatches"]
+
+                        feedback_prompt = "The code did not pass all train pairs.\n"
+                        if error_msg:
+                            feedback_prompt += f"Execution Error:\n{error_msg}\n"
+                        if mismatches:
+                            first_mismatch = mismatches[0]
+                            feedback_prompt += f"Mismatch on a train pair:\n"
+                            feedback_prompt += f"Predicted Shape: {first_mismatch['pred_shape']}, Target Shape: {first_mismatch['target_shape']}\n"
+                            feedback_prompt += f"Predicted Sample (top 3 rows): {first_mismatch['pred_sample']}\n"
+                            feedback_prompt += f"Target Sample (top 3 rows): {first_mismatch['target_sample']}\n"
+
+                        feedback_prompt += "Please correct the code."
+                        messages.append({"role": "user", "content": feedback_prompt})
+
+                        # GC after evaluating feedback to keep memory down in iterative loop
+                        gc.collect()
+                        torch.cuda.empty_cache()
+
             except Exception as e:
                 error_msg = str(e).lower()
                 # Check for rate limit / quota exhaustion / 429 / resource exhausted

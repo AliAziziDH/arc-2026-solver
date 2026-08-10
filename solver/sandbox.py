@@ -1,5 +1,6 @@
 import multiprocessing as mp
 import numpy as np
+import traceback
 
 def _run_with_feedback_worker(code_str, train_pairs, dsl_context, q):
     try:
@@ -39,7 +40,7 @@ def _run_with_feedback_worker(code_str, train_pairs, dsl_context, q):
         q.put(({"success": success, "error": None, "mismatches": mismatches}, None))
 
     except Exception as e:
-        q.put(({"success": False, "error": str(e), "mismatches": []}, None))
+        q.put(({"success": False, "error": traceback.format_exc(), "mismatches": []}, None))
 
 def IPyBoxSandbox_run(code_str: str, train_pairs: list, dsl_context: dict, timeout_secs: float = 2.0) -> dict:
     try:

@@ -99,11 +99,12 @@ def IPyBoxSandbox_run(code_str: str, train_pairs: list, dsl_context: dict, timeo
         if box.process.is_alive():
             return {"success": False, "error": "Timeout exceeded", "mismatches": []}
 
-        if box.queue.empty():
+        try:
+            res, _ = box.queue.get(timeout=1.0)
+            return res
+        except:
             return {"success": False, "error": "No output returned", "mismatches": []}
 
-        res, _ = box.queue.get()
-        return res
 
 def _worker_single(c_str, i_grid, d_ctx, qu):
     try:
@@ -132,8 +133,9 @@ def safe_execute_solve(code_str: str, input_grid: np.ndarray, dsl_context: dict,
         if box.process.is_alive():
             return None, "Timeout exceeded"
 
-        if box.queue.empty():
+        try:
+            res, err = box.queue.get(timeout=1.0)
+            return res, err
+        except:
             return None, "No output returned"
 
-        res, err = box.queue.get()
-        return res, err

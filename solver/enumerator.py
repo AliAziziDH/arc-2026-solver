@@ -469,7 +469,23 @@ class DSLEnumerator:
             return "lambda grid: grid.copy()"
 
         if len(sequence) == 1 and sequence[0][0] == 'llm_custom_patch':
-            return f"lambda grid: (__import__('numpy').ascontiguousarray(__import__('numpy').clip(locals().get('solve', lambda: grid)(), 0, 9), dtype=__import__('numpy').int8))"
+            code_str = sequence[0][1]['code_str']
+            escaped_code = code_str.replace("'''", "\\" + "'" + "\\" + "'" + "\\" + "'")
+            wrapper_code = f"""
+def run_custom_solve(grid):
+    import numpy as np
+    ld = {{'input_grid': grid}}
+    exec('''{escaped_code}''', globals(), ld)
+    if 'solve' in ld:
+        try:
+            res = ld['solve'](grid)
+        except TypeError:
+            res = ld['solve']()
+        if isinstance(res, np.ndarray):
+            return np.ascontiguousarray(np.clip(res, 0, 9), dtype=np.int8)
+    return grid.copy()
+"""
+            return f"(__import__('sys').modules[__name__].__dict__.update({{'run_custom_solve': (lambda ld: (exec({{repr(wrapper_code)}}, globals(), ld) or ld['run_custom_solve']))({{}})}}) or run_custom_solve)"
 
         if len(sequence) == 1 and sequence[0][0] == 'ladder_recompose':
             sub_sequences = sequence[0][1]['sub_sequences']
@@ -539,7 +555,7 @@ def ladder_blend(grid):
                 blended[r, c] = Counter(pixel_colors).most_common(1)[0][0]
     return blended
 """
-            return f"(__import__('sys').modules[__name__].__dict__.update({{'ladder_blend': exec({repr(blender_code)}) or locals()['ladder_blend']}}) or ladder_blend)"
+            return f"(__import__('sys').modules[__name__].__dict__.update({{'ladder_blend': (lambda ld: (exec({{repr(blender_code)}}, globals(), ld) or ld['ladder_blend']))({{}})}}) or ladder_blend)"
 
         code = "grid"
         for name, params in reversed(sequence):

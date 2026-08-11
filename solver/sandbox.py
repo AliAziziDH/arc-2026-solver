@@ -23,7 +23,7 @@ class IPyBoxSandbox:
         self.queue = self.ctx.Queue()
 
         def run_with_setpgrp(*args):
-            os.setpgrp()
+            os.setsid()
             self.target(*args)
 
         args_with_q = list(self.args) + [self.queue]
@@ -35,13 +35,20 @@ class IPyBoxSandbox:
         if self.process and self.process.is_alive():
             try:
                 os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
-            except Exception:
+            except ProcessLookupError:
                 pass
             self.process.join(timeout=0.1)
 
         if self.queue:
             self.queue.close()
             self.queue.join_thread()
+            self.queue = None
+
+        if self.process:
+            self.process.close()
+            self.process = None
+
+        self.ctx = None
 
         gc.collect()
 

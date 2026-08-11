@@ -212,7 +212,7 @@ class DSLEnumerator:
         else:
             return min(valid_sequences, key=len)
 
-    def _decompose_and_solve(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]]) -> Optional[List[Tuple[str, Dict]]]:
+    def _decompose_and_solve(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], test_inputs: List[np.ndarray] = None) -> Optional[List[Tuple[str, Dict]]]:
         first_input, first_output = train_pairs[0]
         metadata = get_object_metadata(first_input)
 
@@ -225,7 +225,7 @@ class DSLEnumerator:
 
         sub_sequences = []
         # Find static structures first to protect them in blending
-        static_colors = find_static_landmarks(train_pairs)
+        static_colors = find_static_landmarks(train_pairs, test_inputs=test_inputs)
 
         for c in colors_to_isolate:
             sub_train_pairs = []
@@ -233,9 +233,9 @@ class DSLEnumerator:
                 isolated_inp = keep_only_color(inp, c, bg=0)
                 sub_train_pairs.append((isolated_inp, out))
 
-            sub_sequence = self.search(sub_train_pairs, remaining_time=10.0, is_subtask=True)
+            sub_sequence = self.search(sub_train_pairs, test_inputs=test_inputs, remaining_time=10.0, is_subtask=True)
             if sub_sequence:
-                sub_sequences.append(sub_sequence)
+                sub_sequences.append({'seq': sub_sequence, 'color': c})
 
         if not sub_sequences:
             return None
@@ -249,7 +249,7 @@ class DSLEnumerator:
 
         return None
 
-    def search(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], remaining_time: Optional[float] = None, is_subtask: bool = False) -> Optional[List[Tuple[str, Dict]]]:
+    def search(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], test_inputs: List[np.ndarray] = None, remaining_time: Optional[float] = None, is_subtask: bool = False) -> Optional[List[Tuple[str, Dict]]]:
         import time
         start_time = time.time()
         self.last_beam_scores = []
@@ -261,7 +261,7 @@ class DSLEnumerator:
 
         first_input, first_output = train_pairs[0]
 
-        static_colors = find_static_landmarks(train_pairs)
+        static_colors = find_static_landmarks(train_pairs, test_inputs=test_inputs)
         memo = StateMemo(static_colors=static_colors)
 
         initial_node = ProgramNode(
@@ -353,7 +353,7 @@ class DSLEnumerator:
                 # If Beam Search fails, first attempt Problem Decomposition
                 elapsed = time.time() - start_time
                 if elapsed > 40:
-                    decomp_seq = self._decompose_and_solve(train_pairs)
+                    decomp_seq = self._decompose_and_solve(train_pairs, test_inputs=test_inputs)
                     if decomp_seq:
                         return decomp_seq
 
@@ -402,13 +402,33 @@ class DSLEnumerator:
                     layers = []
                     sub_sequences = params['sub_sequences']
                     static_colors = params['static_colors']
-                    for sub_seq in sub_sequences:
-                        layer_current = inp.copy()
+                    for sub_seq_dict in sub_sequences:
+                        sub_seq = sub_seq_dict['seq']
+                        c_val = sub_seq_dict['color']
+
+                        # Dynamically find the bounding box for this color in the CURRENT grid
+                        layer_input = keep_only_color(inp, c_val, bg=0)
+                        nz = np.nonzero(layer_input)
+                        if nz[0].size == 0:
+                            continue
+                        r_min = int(np.min(nz[0]))
+                        c_min = int(np.min(nz[1]))
+
+                        layer_current = layer_input.copy()
                         for sub_name, sub_params in sub_seq:
                             func = self.primitive_map.get(sub_name)
                             if func:
                                 layer_current = func(layer_current, **sub_params)
-                        layers.append(layer_current)
+
+                        placed_layer = np.zeros_like(inp)
+                        ph, pw = layer_current.shape
+                        r_end = min(r_min + ph, inp.shape[0])
+                        c_end = min(c_min + pw, inp.shape[1])
+                        ph_trunc = r_end - r_min
+                        pw_trunc = c_end - c_min
+                        if ph_trunc > 0 and pw_trunc > 0:
+                            placed_layer[r_min:r_end, c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
+                        layers.append(placed_layer)
 
                     if not layers:
                         continue
@@ -456,7 +476,10 @@ class DSLEnumerator:
             static_colors = sequence[0][1]['static_colors']
 
             sub_funcs_code = []
-            for idx, sub_seq in enumerate(sub_sequences):
+            colors_code = []
+            for idx, sub_seq_dict in enumerate(sub_sequences):
+                sub_seq = sub_seq_dict['seq']
+                c_val = sub_seq_dict['color']
                 sub_code = "g"
                 for name, params in reversed(sub_seq):
                     if params:
@@ -465,6 +488,7 @@ class DSLEnumerator:
                     else:
                         sub_code = f"{name}({sub_code})"
                 sub_funcs_code.append(f"lambda g: {sub_code}")
+                colors_code.append(str(c_val))
 
             static_set_str = str(static_colors)
 
@@ -473,9 +497,31 @@ def ladder_blend(grid):
     import numpy as np
     from collections import Counter
     funcs = [{', '.join(sub_funcs_code)}]
+    colors = [{', '.join(colors_code)}]
     static_colors = {static_set_str}
 
-    layers = [f(grid.copy()) for f in funcs]
+    layers = []
+    for f, c_val in zip(funcs, colors):
+        # Dynamically find bounding box of isolated color
+        isolated_mask = (grid == c_val)
+        if not np.any(isolated_mask):
+            continue
+        nz = np.nonzero(isolated_mask)
+        r_min, c_min = int(np.min(nz[0])), int(np.min(nz[1]))
+
+        layer_input = np.where(isolated_mask, grid, 0).astype(np.int8)
+        layer_current = f(layer_input)
+
+        placed_layer = np.zeros_like(grid)
+        ph, pw = layer_current.shape
+        r_end = min(r_min + ph, grid.shape[0])
+        c_end = min(c_min + pw, grid.shape[1])
+        ph_trunc = r_end - r_min
+        pw_trunc = c_end - c_min
+        if ph_trunc > 0 and pw_trunc > 0:
+            placed_layer[r_min:r_end, c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
+        layers.append(placed_layer)
+
     if not layers: return grid.copy()
 
     th, tw = layers[0].shape

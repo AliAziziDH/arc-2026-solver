@@ -120,7 +120,8 @@ def main():
             start = time.time()
             sequence = None
             try:
-                sequence = enumerator.search(train_pairs, remaining_time=PER_TASK_TIME_BUDGET)
+                test_inputs = [t[0] for t in test_pairs]
+                sequence = enumerator.search(train_pairs, test_inputs=test_inputs, remaining_time=PER_TASK_TIME_BUDGET)
             except Exception as e:
                 print(f"[{idx+1}/{len(task_files)}] {task_id}: Search error: {e}")
                 sequence = None

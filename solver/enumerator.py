@@ -229,10 +229,29 @@ class DSLEnumerator:
 
         for c in colors_to_isolate:
             sub_train_pairs = []
+            sub_metadata = []
+            valid = True
             for inp, out in train_pairs:
                 isolated_inp = keep_only_color(inp, c, bg=0)
-                sub_train_pairs.append((isolated_inp, out))
+                nz = np.nonzero(isolated_inp)
+                if nz[0].size == 0:
+                    # Color doesn't exist in this train pair
+                    valid = False
+                    break
 
+                r_min, r_max = int(np.min(nz[0])), int(np.max(nz[0]))
+                c_min, c_max = int(np.min(nz[1])), int(np.max(nz[1]))
+                cropped_inp = isolated_inp[r_min:r_max+1, c_min:c_max+1]
+
+                sub_train_pairs.append((cropped_inp, out))
+                sub_metadata.append((r_min, c_min, r_max, c_max))
+
+            if not valid:
+                continue
+
+            # Need to pass cropped test inputs if we were using them in search,
+            # but search doesn't strictly need them unless static colors uses it.
+            # To be perfectly safe, we'll leave test_inputs as is for the sub-search
             sub_sequence = self.search(sub_train_pairs, test_inputs=test_inputs, remaining_time=10.0, is_subtask=True)
             if sub_sequence:
                 sub_sequences.append({'seq': sub_sequence, 'color': c})
@@ -413,8 +432,11 @@ class DSLEnumerator:
                             continue
                         r_min = int(np.min(nz[0]))
                         c_min = int(np.min(nz[1]))
+                        r_max = int(np.max(nz[0]))
+                        c_max = int(np.max(nz[1]))
 
-                        layer_current = layer_input.copy()
+                        # Crop to bounding box before applying sub-sequence
+                        layer_current = layer_input[r_min:r_max+1, c_min:c_max+1].copy()
                         for sub_name, sub_params in sub_seq:
                             func = self.primitive_map.get(sub_name)
                             if func:
@@ -508,9 +530,12 @@ def ladder_blend(grid):
             continue
         nz = np.nonzero(isolated_mask)
         r_min, c_min = int(np.min(nz[0])), int(np.min(nz[1]))
+        r_max, c_max = int(np.max(nz[0])), int(np.max(nz[1]))
 
         layer_input = np.where(isolated_mask, grid, 0).astype(np.int8)
-        layer_current = f(layer_input)
+        # Crop to bounding box before applying sub-sequence
+        cropped_input = layer_input[r_min:r_max+1, c_min:c_max+1]
+        layer_current = f(cropped_input)
 
         placed_layer = np.zeros_like(grid)
         ph, pw = layer_current.shape

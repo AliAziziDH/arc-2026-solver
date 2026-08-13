@@ -11,8 +11,17 @@ def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], test
         if inp.shape != out.shape:
             return set()
 
-        static_mask = (inp == out) & (inp != bg)
-        static_colors_in_pair = set(np.unique(inp[static_mask]))
+        # To be a true static landmark, the ENTIRE mask for that color must be identical
+        # between input and output.
+        static_colors_in_pair = set()
+        for c in range(1, 10):
+            inp_mask = (inp == c)
+            out_mask = (out == c)
+
+            # If the color is present and exactly matches
+            if np.any(inp_mask) and np.array_equal(inp_mask, out_mask):
+                static_colors_in_pair.add(c)
+
         static_colors &= static_colors_in_pair
 
         if not static_colors:

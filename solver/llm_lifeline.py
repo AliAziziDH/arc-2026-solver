@@ -134,6 +134,8 @@ Return ONLY executable Python code inside a markdown code block.
             {"role": "user", "content": prompt}
         ]
 
+        locked_messages_count = len(messages)
+
         wait_time = 5.0
         candidate_scripts = []
 
@@ -178,7 +180,7 @@ Return ONLY executable Python code inside a markdown code block.
                             feedback_prompt = "CRITICAL ERROR: Overfitting/Hardcoding detected! Your program successfully solved the static training examples but failed to generalize when those same examples underwent geometric/color mutations. Rewrite your algorithm using general programmatic logic rather than hardcoded coordinate indexes or static grid values."
                             messages.append({"role": "user", "content": feedback_prompt})
                             if len(messages) > 6:
-                                messages = messages[:2] + messages[-2:]
+                                messages = messages[:locked_messages_count] + messages[-4:]
                             gc.collect()
                             torch.cuda.empty_cache()
                             continue
@@ -205,8 +207,7 @@ Return ONLY executable Python code inside a markdown code block.
 
                         # Apply Sliding-Window token eviction to preserve memory
                         if len(messages) > 6:
-                            # Keep first 2 (system, initial prompt) and last 2 (last interaction)
-                            messages = messages[:2] + messages[-2:]
+                            messages = messages[:locked_messages_count] + messages[-4:]
 
                         # GC after evaluating feedback to keep memory down in iterative loop
                         gc.collect()

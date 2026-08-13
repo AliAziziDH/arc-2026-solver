@@ -34,7 +34,9 @@ class IPyBoxSandbox:
     def __exit__(self, exc_type, exc_val, exc_tb):
         if self.process and self.process.is_alive():
             try:
-                os.killpg(os.getpgid(self.process.pid), signal.SIGKILL)
+                child_pgid = os.getpgid(self.process.pid)
+                if child_pgid != os.getpgrp():
+                    os.killpg(child_pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
             self.process.join(timeout=0.1)

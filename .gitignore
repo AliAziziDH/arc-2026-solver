@@ -4,3 +4,5 @@ __pycache__/
 submission.json
 submission.csv
 *.pyc
+data/
+data

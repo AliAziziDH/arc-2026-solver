@@ -1,1 +1,6 @@
 __pycache__/\n.venv/\n*.pyc\n.DS_Store\nlogs/
+__pycache__/
+*.log
+submission.json
+submission.csv
+*.pyc

@@ -7,8 +7,9 @@
   "is_private": true,
   "enable_gpu": true,
   "enable_internet": false,
-  "dataset_sources": [
-    "huggingface/qwen2.5-coder-7b-instruct"
+  "dataset_sources": [],
+  "model_sources": [
+    "qwen/qwen2.5-coder-7b-instruct/transformers/default/1"
   ],
   "competition_sources": [
     "arc-prize-2026-arc-agi-2"

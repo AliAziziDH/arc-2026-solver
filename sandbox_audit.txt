@@ -1,0 +1,8 @@
+Traceback (most recent call last):
+  File "/app/generate_submission.py", line 15, in <module>
+    from solver.enumerator import DSLEnumerator
+  File "/app/solver/enumerator.py", line 11, in <module>
+    from solver.llm_lifeline import LLMSurgicalLifeline
+  File "/app/solver/llm_lifeline.py", line 212
+    messages = messages[:locked_messages_count] + messages[-4:]
+IndentationError: unexpected indent

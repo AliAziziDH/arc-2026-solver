@@ -1,0 +1,23 @@
+Loaded 10 tasks from single file: data/arc-agi_evaluation-challenges.json
+[1/10] 00576224: FATAL ERROR - Simulated OOM for test
+[2/10] 007bbfb7: processed (0.10s)
+[3/10] 009d5c81: processed (0.20s)
+[4/10] 00d62c1b: processed (0.12s)
+[5/10] 00dbd492: processed (0.10s)
+[6/10] 017c7c7b: processed (0.04s)
+[7/10] 025d127b: processed (0.18s)
+[8/10] 03560426: processed (0.24s)
+[9/10] 045e512c: processed (0.33s)
+[10/10] 0520fde7: processed (0.00s)
+
+============================================================
+Submission written to submission.json
+  Total tasks: 10
+  Tasks solved: 0
+  Tasks failed: 10
+  Tasks no program: 0
+============================================================
+\nVerifying submission.json...
+  [OK] 10 tasks in submission
+  [OK] 20/20 valid attempts (2D lists)
+\n  Verification PASSED ✓

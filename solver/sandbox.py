@@ -24,6 +24,7 @@ class IPyBoxSandbox:
 
         def run_with_setpgrp(*args):
             os.setsid()
+            print(f"[Sandbox Governance] Created isolated process group PGID: {os.getpgrp()} via os.setsid().")
             self.target(*args)
 
         args_with_q = list(self.args) + [self.queue]
@@ -36,6 +37,7 @@ class IPyBoxSandbox:
             try:
                 child_pgid = os.getpgid(self.process.pid)
                 if child_pgid != os.getpgrp():
+                    print(f"[Sandbox Governance] Terminating process group PGID: {child_pgid} with signal SIGKILL.")
                     os.killpg(child_pgid, signal.SIGKILL)
             except ProcessLookupError:
                 pass
@@ -52,6 +54,7 @@ class IPyBoxSandbox:
 
         self.ctx = None
 
+        print("[Sandbox Governance] gc.collect() executed post-execution.")
         gc.collect()
 
 def _run_with_feedback_worker(code_str, train_pairs, dsl_context, q):

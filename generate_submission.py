@@ -20,19 +20,24 @@ from utils.memory_manager import force_memory_cleanup
 # ---------------------------------------------------------------------------
 # Configuration
 # ---------------------------------------------------------------------------
-TASKS_DIR = "tasks"
-SUBMISSION_FILE = "submission.json"
-PER_TASK_TIME_BUDGET = 5.0   # seconds per task (fast, avoids heavy loops)
+import argparse
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--input', type=str, default='tasks')
+parser.add_argument('--output', type=str, default='submission.json')
+parser.add_argument('--timeout', type=int, default=5)
+args, unknown = parser.parse_known_args()
+
+TASKS_DIR = args.input
+SUBMISSION_FILE = args.output
+PER_TASK_TIME_BUDGET = args.timeout   # seconds per task (fast, avoids heavy loops)
 MAX_TASKS = None             # None = process all tasks in tasks/ dir
 
 # ---------------------------------------------------------------------------
 # Task loading
 # ---------------------------------------------------------------------------
-def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[Tuple[np.ndarray, np.ndarray]]]:
-    """Load an ARC task JSON file into train/test pairs of numpy grids."""
-    with open(filepath, 'r') as f:
-        data = json.load(f)
-
+def parse_task_data(data: dict) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[Tuple[np.ndarray, np.ndarray]]]:
+    """Load a single ARC task dictionary into train/test pairs of numpy grids."""
     train_pairs = [
         (np.array(p['input'], dtype=np.int8), np.array(p['output'], dtype=np.int8))
         for p in data.get('train', [])
@@ -42,6 +47,12 @@ def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[
         for p in data.get('test', [])
     ]
     return train_pairs, test_pairs
+
+def load_task(filepath: str) -> Tuple[List[Tuple[np.ndarray, np.ndarray]], List[Tuple[np.ndarray, np.ndarray]]]:
+    """Load an ARC task JSON file into train/test pairs of numpy grids."""
+    with open(filepath, 'r') as f:
+        data = json.load(f)
+    return parse_task_data(data)
 
 # ---------------------------------------------------------------------------
 # DSL context (same primitives as main.py)
@@ -82,14 +93,29 @@ def grid_to_list(grid: np.ndarray) -> List[List[int]]:
 # ---------------------------------------------------------------------------
 def main():
     gc.set_threshold(700, 10, 10)
-    os.makedirs(TASKS_DIR, exist_ok=True)
 
-    # Collect task files
-    task_files = sorted(f for f in os.listdir(TASKS_DIR) if f.endswith('.json'))
-    if MAX_TASKS is not None:
-        task_files = task_files[:MAX_TASKS]
+    tasks_to_run = {}
+    if os.path.isdir(TASKS_DIR):
+        task_files = sorted(f for f in os.listdir(TASKS_DIR) if f.endswith('.json'))
+        if MAX_TASKS is not None:
+            task_files = task_files[:MAX_TASKS]
+        print(f"Found {len(task_files)} task files in {TASKS_DIR}/")
 
-    print(f"Found {len(task_files)} task files in {TASKS_DIR}/")
+        for filename in task_files:
+            task_id = filename[:-5]
+            with open(os.path.join(TASKS_DIR, filename), 'r') as f:
+                tasks_to_run[task_id] = json.load(f)
+    elif os.path.isfile(TASKS_DIR):
+        with open(TASKS_DIR, 'r') as f:
+            all_tasks = json.load(f)
+            print(f"Loaded {len(all_tasks)} tasks from single file: {TASKS_DIR}")
+            if MAX_TASKS is not None:
+                tasks_to_run = {k: all_tasks[k] for k in list(all_tasks.keys())[:MAX_TASKS]}
+            else:
+                tasks_to_run = all_tasks
+    else:
+        print(f"Input path {TASKS_DIR} does not exist.")
+        return
 
     # Build enumerator + DSL context once
     enumerator = DSLEnumerator(beam_width=32, max_depth=3)
@@ -99,17 +125,14 @@ def main():
     submission_data = {}
     stats = {"solved": 0, "failed": 0, "no_program": 0}
 
-    for idx, filename in enumerate(task_files):
-        task_id = filename[:-5]  # strip .json
-        filepath = os.path.join(TASKS_DIR, filename)
-
+    for idx, (task_id, task_data) in enumerate(tasks_to_run.items()):
         submission_data[task_id] = []
 
         try:
-            train_pairs, test_pairs = load_task(filepath)
+            train_pairs, test_pairs = parse_task_data(task_data)
 
             if not train_pairs:
-                print(f"[{idx+1}/{len(task_files)}] {task_id}: No training pairs, skipping")
+                print(f"[{idx+1}/{len(tasks_to_run)}] {task_id}: No training pairs, skipping")
                 for t_in, _ in test_pairs:
                     default_pred = grid_to_list(t_in)
                     submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
@@ -129,7 +152,7 @@ def main():
             elapsed = time.time() - start
 
             if sequence is None:
-                print(f"[{idx+1}/{len(task_files)}] {task_id}: No program found ({elapsed:.2f}s)")
+                print(f"[{idx+1}/{len(tasks_to_run)}] {task_id}: No program found ({elapsed:.2f}s)")
                 for t_in, _ in test_pairs:
                     default_pred = grid_to_list(t_in)
                     submission_data[task_id].append({"attempt_1": default_pred, "attempt_2": default_pred})
@@ -156,24 +179,24 @@ def main():
 
             if task_solved:
                 stats["solved"] += 1
-                print(f"[{idx+1}/{len(task_files)}] {task_id}: SOLVED ({elapsed:.2f}s)")
+                print(f"[{idx+1}/{len(tasks_to_run)}] {task_id}: SOLVED ({elapsed:.2f}s)")
             else:
                 stats["failed"] += 1
-                print(f"[{idx+1}/{len(task_files)}] {task_id}: processed ({elapsed:.2f}s)")
+                print(f"[{idx+1}/{len(tasks_to_run)}] {task_id}: processed ({elapsed:.2f}s)")
 
         except Exception as global_err:
-            print(f"[{idx+1}/{len(task_files)}] {task_id}: FATAL ERROR - {global_err}")
+            print(f"[{idx+1}/{len(tasks_to_run)}] {task_id}: FATAL ERROR - {global_err}")
             # Universal fallback for this task
             # Attempt to re-load just to get the test pairs if they aren't loaded
             try:
-                if 'test_pairs' not in locals():
-                    _, test_pairs = load_task(filepath)
+                # 'test_pairs' might leak from previous loop iterations. Explicitly parse test pairs from the current task_data.
+                _, fallback_test_pairs = parse_task_data(task_data)
             except:
-                test_pairs = [(np.array([[0]], dtype=np.int8), np.array([[0]], dtype=np.int8))]
+                fallback_test_pairs = [(np.array([[0]], dtype=np.int8), np.array([[0]], dtype=np.int8))]
 
             # Ensure the output is cleared and properly pushed
             submission_data[task_id] = []
-            for t_in, _ in test_pairs:
+            for t_in, _ in fallback_test_pairs:
                 try:
                     default_pred = grid_to_list(t_in)
                 except:
@@ -219,17 +242,21 @@ def verify_submission(filepath: str):
 
     # Check each task
     valid_attempts = 0
-    for task_id, attempts in data.items():
-        assert 'attempt_1' in attempts, f"Task {task_id} missing attempt_1"
-        assert 'attempt_2' in attempts, f"Task {task_id} missing attempt_2"
+    for task_id, task_attempts in data.items():
+        assert isinstance(task_attempts, list), f"Task {task_id} must be a list of attempts"
+        for attempts in task_attempts:
+            assert 'attempt_1' in attempts, f"Task {task_id} missing attempt_1"
+            assert 'attempt_2' in attempts, f"Task {task_id} missing attempt_2"
 
-        # Verify 2D list format
-        for att in ['attempt_1', 'attempt_2']:
-            grid = attempts[att]
-            if isinstance(grid, list) and all(isinstance(row, list) for row in grid):
-                valid_attempts += 1
+            # Verify 2D list format
+            for att in ['attempt_1', 'attempt_2']:
+                grid = attempts[att]
+                if isinstance(grid, list) and all(isinstance(row, list) for row in grid):
+                    valid_attempts += 1
 
-    print(f"  [OK] {valid_attempts}/{len(data)*2} valid attempts (2D lists)")
+    # Count total expected attempts (2 attempts per test pair)
+    total_expected = sum(len(attempts) * 2 for task_id, attempts in data.items())
+    print(f"  [OK] {valid_attempts}/{total_expected} valid attempts (2D lists)")
     print(f"\\n  Verification PASSED ✓")
 
 if __name__ == '__main__':

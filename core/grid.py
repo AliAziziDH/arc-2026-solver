@@ -33,7 +33,7 @@ def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], test
 
     return static_colors
 
-def canonicalize_colors(grid: np.ndarray, bg: int = 0, static_colors: set = None) -> np.ndarray:
+def normalize_grid_colors(grid: np.ndarray, bg: int = 0, static_colors: set = None) -> np.ndarray:
     """
     Normalizes colors in the grid so that identical spatial configurations
     with different colors map to the same grid representation.
@@ -116,23 +116,62 @@ def get_object_metadata(grid: np.ndarray, bg: int = 0) -> List[Dict]:
 
         r_min, r_max = slc[0].start, slc[0].stop - 1
         c_min, c_max = slc[1].start, slc[1].stop - 1
-        height = r_max - r_min + 1
-        width = c_max - c_min + 1
         area = int(np.sum(obj_mask))
 
         # Check symmetry
-        obj_grid = np.full((height, width), bg, dtype=np.int8)
+        obj_grid = np.full((r_max - r_min + 1, c_max - c_min + 1), bg, dtype=np.int8)
         obj_grid[obj_mask] = grid[slc][obj_mask]
 
         fh = np.fliplr(obj_grid)
         fv = np.flipud(obj_grid)
-        is_symmetric = bool(np.array_equal(obj_grid, fh) or np.array_equal(obj_grid, fv))
+        horizontal = bool(np.array_equal(obj_grid, fh))
+        vertical = bool(np.array_equal(obj_grid, fv))
+
+        # Diagonal symmetries
+        if obj_grid.shape[0] == obj_grid.shape[1]:
+            d1 = bool(np.array_equal(obj_grid, obj_grid.T))
+            d2 = bool(np.array_equal(obj_grid, np.fliplr(np.flipud(obj_grid).T)))
+            diagonal = d1 or d2
+        else:
+            diagonal = False
 
         metadata.append({
-            "color": color,
+            "object_id": i,
             "bbox": (r_min, c_min, r_max, c_max),
-            "size": {"height": height, "width": width, "area": area},
-            "is_symmetric": is_symmetric
+            "color": color,
+            "area": area,
+            "symmetries": {
+                "horizontal": horizontal,
+                "vertical": vertical,
+                "diagonal": diagonal
+            },
+            "parent_id": None
         })
+
+    # Determine parent/child relationships based on bbox containment
+    for i, obj in enumerate(metadata):
+        r_min, c_min, r_max, c_max = obj["bbox"]
+
+        # Find smallest containing parent
+        parent_candidate = None
+        min_parent_area = float('inf')
+
+        for j, other in enumerate(metadata):
+            if i == j:
+                continue
+
+            or_min, oc_min, or_max, oc_max = other["bbox"]
+
+            # Check if obj is entirely enclosed within other
+            if (or_min <= r_min and or_max >= r_max and
+                oc_min <= c_min and oc_max >= c_max):
+
+                # Check actual mask overlap (not just bbox) if we wanted strictly mask containment
+                # For now, following instructions: "determine containment by checking if one object's bounding box is entirely enclosed within another object's bounding box"
+                if other["area"] < min_parent_area:
+                    min_parent_area = other["area"]
+                    parent_candidate = other["object_id"]
+
+        obj["parent_id"] = parent_candidate
 
     return metadata

@@ -95,12 +95,9 @@ class SpatialAttentionTool:
                 bbox_w = max_c - min_c + 1
                 
                 objects.append({
-                    "object_id": object_counter,
+                    "id": object_counter,
+                    "bbox": [int(min_r), int(min_c), int(max_r), int(max_c)],
                     "color": int(val),
-                    "coords": coords,
-                    "bbox": (int(min_r), int(min_c), int(max_r), int(max_c)),
-                    "width": int(bbox_w),
-                    "height": int(bbox_h),
                     "area": len(coords)
                 })
                 object_counter += 1
@@ -215,11 +212,12 @@ class SpatialAttentionTool:
         assert len(objs) == 1, f"Expected 1 object, found {len(objs)}"
         obj = objs[0]
         assert obj["color"] == 2, f"Expected color 2, got {obj['color']}"
-        assert obj["bbox"] == (3, 4, 5, 6), f"Expected bbox (3, 4, 5, 6), got {obj['bbox']}"
+        assert obj["bbox"] == [3, 4, 5, 6], f"Expected bbox [3, 4, 5, 6], got {obj['bbox']}"
+        assert "id" in obj, "Missing 'id' key in schema"
         print("[✓] Connected Component Segmentation Pass.")
         
         # Test 2: Localized cropping & metadata extraction
-        cropped, meta = cls.crop_attention_window(mock_parent, obj["bbox"])
+        cropped, meta = cls.crop_attention_window(mock_parent, tuple(obj["bbox"]))
         assert cropped.shape == (3, 3), f"Expected 3x3 crop, got {cropped.shape}"
         assert meta["start_row"] == 3 and meta["start_col"] == 4, "Anchor metadata drift detected!"
         print("[✓] Coordinate Anchor Metadata Extraction Pass.")

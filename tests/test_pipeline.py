@@ -5,7 +5,7 @@ import glob
 import pytest
 from solver.sandbox import safe_execute_solve
 from core.grid import get_object_metadata
-from spatial_attention_tool import SpatialAttentionTool
+from core.spatial_attention_tool import SpatialAttentionTool
 
 def test_primitives_and_sandbox():
     # Verify object metadata extraction on simple grids

@@ -7,6 +7,7 @@ from core.primitives import (
     extract_smallest, gravity_down, fill_holes, tile_to_size, pad_to_size
 )
 from core.grid import get_object_metadata, find_static_landmarks
+from core.spatial_attention_tool import SpatialAttentionTool
 from solver.memo import StateMemo
 from solver.llm_lifeline import LLMSurgicalLifeline
 
@@ -60,6 +61,7 @@ class DSLEnumerator:
         self.nodes_explored: int = 0
         self.depth_reached: int = 0
         self.llm_lifeline = LLMSurgicalLifeline()
+        self._has_tried_spatial = False
         self.primitive_map: Dict[str, Callable] = {
             'rotate_90': rotate_90, 'flip_h': flip_h, 'flip_v': flip_v,
             'transpose': transpose, 'crop_bbox': crop_bbox, 'scale': scale,
@@ -274,6 +276,8 @@ class DSLEnumerator:
         self.last_beam_scores = []
         self.nodes_explored = 0
         self.depth_reached = 0
+        if not is_subtask:
+            self._has_tried_spatial = False
 
         if not train_pairs:
             return None
@@ -369,12 +373,96 @@ class DSLEnumerator:
             best_score = beam[0].score
 
             if not is_subtask:
-                # If Beam Search fails, first attempt Problem Decomposition
                 elapsed = time.time() - start_time
-                if elapsed > 40:
-                    decomp_seq = self._decompose_and_solve(train_pairs, test_inputs=test_inputs)
-                    if decomp_seq:
-                        return decomp_seq
+
+                # If Beam Search fails to find a 100% match within 15 seconds, trigger SpatialAttentionTool fallback
+                if elapsed > 15 and not self._has_tried_spatial:
+                    self._has_tried_spatial = True
+                    print(f"[{elapsed:.2f}s] Beam Search failed to find full match. Triggering Spatial Attention fallback...")
+                    # Perform Spatial Attention segment and crop localized search fallback
+                    spatial_valid_seq = None
+                    successful_obj_color = None
+                    for inp, out in train_pairs:
+                        objects = SpatialAttentionTool.find_connected_components(inp)
+                        for obj in objects:
+                            cropped_inp, metadata = SpatialAttentionTool.crop_attention_window(inp, tuple(obj["bbox"]))
+
+                            # Find matching target subgrid to search against (we shouldn't search against full output)
+                            # Let's crop the target output based on non-zero elements or a matching region if possible.
+                            # We can also attempt to match to the full output if it's small, but a better approach
+                            # is to just try a sub-search against the cropped target if we expect it's a 1-to-1 mapping
+                            # For simplicity we try to use the cropped bounds to crop the output as well, if sizes match
+
+                            th, tw = out.shape
+                            r_start = metadata["start_row"]
+                            c_start = metadata["start_col"]
+                            sub_h, sub_w = cropped_inp.shape
+                            r_end = min(th, r_start + sub_h)
+                            c_end = min(tw, c_start + sub_w)
+
+                            if r_start < th and c_start < tw:
+                                cropped_out = out[r_start:r_end, c_start:c_end]
+                            else:
+                                cropped_out = out
+
+                            # Run localized search on the cropped component
+                            localized_seq = self.search([(cropped_inp, cropped_out)], test_inputs=test_inputs, remaining_time=5.0, is_subtask=True)
+
+                            if localized_seq:
+                                # Verify this sequence across ALL pairs
+                                is_globally_valid = True
+                                for t_inp, t_out in train_pairs:
+                                    t_objects = SpatialAttentionTool.find_connected_components(t_inp)
+                                    # Find matching object by color
+                                    t_obj = next((o for o in t_objects if o["color"] == obj["color"]), None)
+                                    if not t_obj:
+                                        is_globally_valid = False
+                                        break
+
+                                    t_cropped_inp, t_metadata = SpatialAttentionTool.crop_attention_window(t_inp, tuple(t_obj["bbox"]))
+
+                                    transformed = t_cropped_inp.copy()
+                                    try:
+                                        for name, params in localized_seq:
+                                            func = self.primitive_map.get(name)
+                                            if func:
+                                                transformed = func(transformed, **params)
+
+                                        rebuilt = SpatialAttentionTool.overlay_attention_window(
+                                            canvas=np.zeros_like(t_inp),
+                                            cropped_grid=transformed,
+                                            metadata=t_metadata,
+                                            blend_mode="alpha_composite"
+                                        )
+
+                                        if not np.array_equal(rebuilt, t_out):
+                                            is_globally_valid = False
+                                            break
+                                    except Exception:
+                                        is_globally_valid = False
+                                        break
+
+                                if is_globally_valid:
+                                    spatial_valid_seq = localized_seq
+                                    successful_obj_color = obj["color"]
+                                    break
+                        if spatial_valid_seq:
+                            break
+
+                    if spatial_valid_seq:
+                        # Construct a special spatial compositional macro sequence similar to ladder recompose
+                        composite_sequence = [('ladder_recompose', {
+                            'sub_sequences': [{'seq': spatial_valid_seq, 'color': successful_obj_color}],
+                            'static_colors': find_static_landmarks(train_pairs, test_inputs=test_inputs)
+                        })]
+                        if self._verify_on_all(composite_sequence, train_pairs):
+                            return composite_sequence
+
+                    # Next attempt Problem Decomposition
+                    if elapsed > 40:
+                        decomp_seq = self._decompose_and_solve(train_pairs, test_inputs=test_inputs)
+                        if decomp_seq:
+                            return decomp_seq
 
                 # Finally, attempt LLM Lifeline
                 if 0.75 <= best_score < 1.0 and len(train_pairs) >= 2:

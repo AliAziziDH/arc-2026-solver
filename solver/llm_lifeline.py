@@ -8,7 +8,7 @@ import numpy as np
 from typing import List, Tuple, Optional, Dict, Any
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 from solver.sandbox import safe_execute_solve, IPyBoxSandbox_run
-from core.grid import get_object_metadata
+from core.grid import get_object_metadata, canonicalize_grid
 
 class LLMSurgicalLifeline:
     def __init__(self, model_id: str = "/kaggle/input/qwen2.5-coder-7b-instruct"):
@@ -118,26 +118,60 @@ class LLMSurgicalLifeline:
         obj_metadata = get_object_metadata(current)
         obj_meta_str = json.dumps(obj_metadata, indent=2)
 
-        prompt = f"""You are an elite ARC-AGI expert programmer. A partial DSL program produced an incorrect grid.
-Train Pair 0 Mismatch:
+        _, color_map = canonicalize_grid(current)
+        color_map_info = json.dumps(color_map)
+
+        system_prompt = """### [SYSTEM INSTRUCTIONS]
+You are the Active Coding Lifeline agent in AuroraGate v3.5.
+Your goal is to write a Python 3 function `solve(grid: List[List[int]]) -> List[List[int]]`
+that solves the given ARC puzzle.
+
+[CONSTRAINTS]
+- You must ONLY use the approved 15 primitives in `core/primitives.py` (e.g. crop_bbox, rotate_90, fill_holes).
+- Your output must be a valid python function wrapped in ```python ... ```.
+"""
+
+        user_prompt = f"""### [WORKSPACE STATE]
+The last compilation attempt failed. Here is the feedback from our stateful REPL executor:
+
+[EXECUTION RESULTS & TRACEBACK]
 {diff_str}
 
 Train Pair 0 Predicted Object Metadata:
 {obj_meta_str}
 
-Write a Python function named `solve()` that takes `input_grid` (a 2D numpy array) and returns the correct output 2D numpy array. You can use numpy operations and helper functions.
-Return ONLY executable Python code inside a markdown code block.
+[DIAGNOSTIC GUIDELINES]
+1. If the error is 'DimensionMismatch', verify if you should apply 'crop_bbox' or 'pad_to_size' to align with target dimensions.
+2. If the error is 'ColorMismatch', check your color mappings. Non-zero colors are canonicalized as: {color_map_info}.
+3. Adjust your logic to satisfy the remaining Train Pairs. Do not repeat the failed code structure!
 """
 
         messages = [
-            {"role": "system", "content": "You are an expert ARC-AGI Python programmer."},
-            {"role": "user", "content": prompt}
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
         ]
 
         locked_messages_count = len(messages)
 
         wait_time = 5.0
         candidate_scripts = []
+
+        def check_and_evict(messages_list):
+            # Hybrid token eviction schema
+            token_count = 0
+            if self._tokenizer:
+                try:
+                    text = self._tokenizer.apply_chat_template(messages_list, tokenize=False, add_generation_prompt=False)
+                    token_count = len(self._tokenizer.encode(text))
+                except Exception:
+                    token_count = sum(len(m['content']) for m in messages_list) // 4
+            else:
+                token_count = sum(len(m['content']) for m in messages_list) // 4
+
+            if token_count > 6000:
+                print(f"[LADDER Eviction] Context exceeds 6000 tokens ({token_count}). Evicting Turn N-2 and older.")
+                return messages_list[:locked_messages_count] + messages_list[-4:]
+            return messages_list
 
         for attempt in range(max_retries):
             try:
@@ -179,9 +213,7 @@ Return ONLY executable Python code inside a markdown code block.
                             # Program overfitted to static coords/colors
                             feedback_prompt = "CRITICAL ERROR: Overfitting/Hardcoding detected! Your program successfully solved the static training examples but failed to generalize when those same examples underwent geometric/color mutations. Rewrite your algorithm using general programmatic logic rather than hardcoded coordinate indexes or static grid values."
                             messages.append({"role": "user", "content": feedback_prompt})
-                            if len(messages) > locked_messages_count + 4:
-                                print(f"[LADDER Eviction] Sliding-window context eviction engaged: retained {locked_messages_count} locked rules, pruned intermediate traces down to 4.")
-                                messages = messages[:locked_messages_count] + messages[-4:]
+                            messages = check_and_evict(messages)
                             gc.collect()
                             torch.cuda.empty_cache()
                             continue
@@ -193,23 +225,34 @@ Return ONLY executable Python code inside a markdown code block.
                             # It ran without throwing an error but had mismatches
                             candidate_scripts.append(code_str)
 
-                        feedback_prompt = "The code did not pass all train pairs.\n"
+                        # Capture full traceback and mismatches to populate {traceback_info}
+                        tb_info = "The code did not pass all train pairs.\n"
                         if error_msg:
-                            feedback_prompt += f"Execution Error:\n{error_msg}\n"
+                            tb_info += f"Execution Error & Traceback:\n{error_msg}\n"
                         if mismatches:
                             first_mismatch = mismatches[0]
-                            feedback_prompt += f"Mismatch on a train pair:\n"
-                            feedback_prompt += f"Predicted Shape: {first_mismatch['pred_shape']}, Target Shape: {first_mismatch['target_shape']}\n"
-                            feedback_prompt += f"Predicted Sample (top 3 rows): {first_mismatch['pred_sample']}\n"
-                            feedback_prompt += f"Target Sample (top 3 rows): {first_mismatch['target_sample']}\n"
+                            tb_info += f"Mismatch on a train pair:\n"
+                            tb_info += f"Predicted Shape: {first_mismatch['pred_shape']}, Target Shape: {first_mismatch['target_shape']}\n"
+                            tb_info += f"Predicted Sample (top 3 rows): {first_mismatch['pred_sample']}\n"
+                            tb_info += f"Target Sample (top 3 rows): {first_mismatch['target_sample']}\n"
+
+                        feedback_prompt = f"""### [WORKSPACE STATE]
+The last compilation attempt failed. Here is the feedback from our stateful REPL executor:
+
+[EXECUTION RESULTS & TRACEBACK]
+{tb_info}
+
+[DIAGNOSTIC GUIDELINES]
+1. If the error is 'DimensionMismatch', verify if you should apply 'crop_bbox' or 'pad_to_size' to align with target dimensions.
+2. If the error is 'ColorMismatch', check your color mappings. Non-zero colors are canonicalized as: {color_map_info}.
+3. Adjust your logic to satisfy the remaining Train Pairs. Do not repeat the failed code structure!
+"""
 
                         feedback_prompt += "Please correct the code."
                         messages.append({"role": "user", "content": feedback_prompt})
 
                         # Apply Sliding-Window token eviction to preserve memory
-                        if len(messages) > locked_messages_count + 4:
-                            print(f"[LADDER Eviction] Sliding-window context eviction engaged: retained {locked_messages_count} locked rules, pruned intermediate traces down to 4.")
-                            messages = messages[:locked_messages_count] + messages[-4:]
+                        messages = check_and_evict(messages)
 
                         # GC after evaluating feedback to keep memory down in iterative loop
                         gc.collect()

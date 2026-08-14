@@ -29,12 +29,16 @@ def crop_bbox(grid: np.ndarray, bg: int = 0) -> np.ndarray:
 
 # 2. SCALING
 def scale(grid: np.ndarray, factor: int) -> np.ndarray:
-    if factor <= 1:
+    if factor <= 0:
         return grid.copy()
-    return np.ascontiguousarray(
-        np.repeat(np.repeat(grid, factor, axis=0), factor, axis=1),
-        dtype=np.int8
-    )
+
+    h, w = grid.shape
+    target_h = min(30, h * factor)
+    target_w = min(30, w * factor)
+
+    scaled = np.repeat(np.repeat(grid, factor, axis=0), factor, axis=1)
+
+    return np.ascontiguousarray(scaled[:target_h, :target_w], dtype=np.int8)
 
 # 3. COLOR OPERATIONS
 def replace_color(grid: np.ndarray, old: int, new: int) -> np.ndarray:
@@ -144,26 +148,34 @@ def fill_holes(grid: np.ndarray, bg: int = 0) -> np.ndarray:
 
 # 7. TILING & PADDING
 def tile_to_size(grid: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
-    if grid.shape[0] == 0 or grid.shape[1] == 0:
-        return np.full((target_h, target_w), 0, dtype=np.int8)
-    rep_h = int(np.ceil(target_h / grid.shape[0]))
-    rep_w = int(np.ceil(target_w / grid.shape[1]))
+    target_h = min(30, target_h)
+    target_w = min(30, target_w)
+
+    h, w = grid.shape
+    if h == 0 or w == 0:
+        return np.zeros((target_h, target_w), dtype=np.int8)
+
+    rep_h = int(np.ceil(target_h / h))
+    rep_w = int(np.ceil(target_w / w))
+
     tiled = np.tile(grid, (rep_h, rep_w))
     return np.ascontiguousarray(tiled[:target_h, :target_w], dtype=np.int8)
 
 def pad_to_size(grid: np.ndarray, target_h: int, target_w: int, bg: int = 0) -> np.ndarray:
     h, w = grid.shape
+
+    target_h = min(30, target_h)
+    target_w = min(30, target_w)
+
     if h >= target_h and w >= target_w:
         r_start = (h - target_h) // 2
         c_start = (w - target_w) // 2
         return np.ascontiguousarray(grid[r_start:r_start+target_h, c_start:c_start+target_w], dtype=np.int8)
-    pad_top = (target_h - h) // 2
-    pad_bottom = target_h - h - pad_top
-    pad_left = (target_w - w) // 2
-    pad_right = target_w - w - pad_left
-    return np.ascontiguousarray(np.pad(
-        grid,
-        pad_width=((pad_top, pad_bottom), (pad_left, pad_right)),
-        mode='constant',
-        constant_values=bg
-    ), dtype=np.int8)
+
+    padded = np.full((target_h, target_w), fill_value=bg, dtype=np.int8)
+
+    copy_h = min(h, target_h)
+    copy_w = min(w, target_w)
+    padded[:copy_h, :copy_w] = grid[:copy_h, :copy_w]
+
+    return padded

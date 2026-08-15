@@ -119,11 +119,13 @@ class LLMSurgicalLifeline:
         obj_meta_str = json.dumps(obj_metadata, indent=2)
 
         _, color_map = canonicalize_grid(current)
-        color_map_info = json.dumps(color_map)
+        canonical_color_map_info = json.dumps(color_map)
+
+        traceback_info = f"{diff_str}\n\nTrain Pair 0 Predicted Object Metadata:\n{obj_meta_str}"
 
         system_prompt = """### [SYSTEM INSTRUCTIONS]
 You are the Active Coding Lifeline agent in AuroraGate v3.5.
-Your goal is to write a Python 3 function `solve(grid: List[List[int]]) -> List[List[int]]`
+Your goal is to write a Python 3 function `def solve(grid: List[List[int]]) -> List[List[int]]:`
 that solves the given ARC puzzle.
 
 [CONSTRAINTS]
@@ -135,14 +137,11 @@ that solves the given ARC puzzle.
 The last compilation attempt failed. Here is the feedback from our stateful REPL executor:
 
 [EXECUTION RESULTS & TRACEBACK]
-{diff_str}
-
-Train Pair 0 Predicted Object Metadata:
-{obj_meta_str}
+{traceback_info}
 
 [DIAGNOSTIC GUIDELINES]
 1. If the error is 'DimensionMismatch', verify if you should apply 'crop_bbox' or 'pad_to_size' to align with target dimensions.
-2. If the error is 'ColorMismatch', check your color mappings. Non-zero colors are canonicalized as: {color_map_info}.
+2. If the error is 'ColorMismatch', check your color mappings. Non-zero colors are canonicalized as: {canonical_color_map_info}.
 3. Adjust your logic to satisfy the remaining Train Pairs. Do not repeat the failed code structure!
 """
 
@@ -170,7 +169,7 @@ Train Pair 0 Predicted Object Metadata:
 
             if token_count > 6000:
                 print(f"[LADDER Eviction] Context exceeds 6000 tokens ({token_count}). Evicting Turn N-2 and older.")
-                return messages_list[:locked_messages_count] + messages_list[-4:]
+                return messages_list[:locked_messages_count] + messages_list[-2:]
             return messages_list
 
         for attempt in range(max_retries):
@@ -236,15 +235,16 @@ Train Pair 0 Predicted Object Metadata:
                             tb_info += f"Predicted Sample (top 3 rows): {first_mismatch['pred_sample']}\n"
                             tb_info += f"Target Sample (top 3 rows): {first_mismatch['target_sample']}\n"
 
+                        traceback_info = tb_info
                         feedback_prompt = f"""### [WORKSPACE STATE]
 The last compilation attempt failed. Here is the feedback from our stateful REPL executor:
 
 [EXECUTION RESULTS & TRACEBACK]
-{tb_info}
+{traceback_info}
 
 [DIAGNOSTIC GUIDELINES]
 1. If the error is 'DimensionMismatch', verify if you should apply 'crop_bbox' or 'pad_to_size' to align with target dimensions.
-2. If the error is 'ColorMismatch', check your color mappings. Non-zero colors are canonicalized as: {color_map_info}.
+2. If the error is 'ColorMismatch', check your color mappings. Non-zero colors are canonicalized as: {canonical_color_map_info}.
 3. Adjust your logic to satisfy the remaining Train Pairs. Do not repeat the failed code structure!
 """
 

@@ -509,36 +509,30 @@ class DSLEnumerator:
                     layers = []
                     sub_sequences = params['sub_sequences']
                     static_colors = params['static_colors']
+                    # Pre-compute connected components once for this input
+                    objects = SpatialAttentionTool.find_connected_components(inp)
+
                     for sub_seq_dict in sub_sequences:
                         sub_seq = sub_seq_dict['seq']
                         c_val = sub_seq_dict['color']
 
-                        # Dynamically find the bounding box for this color in the CURRENT grid
-                        layer_input = keep_only_color(inp, c_val, bg=0)
-                        nz = np.nonzero(layer_input)
-                        if nz[0].size == 0:
-                            continue
-                        r_min = int(np.min(nz[0]))
-                        c_min = int(np.min(nz[1]))
-                        r_max = int(np.max(nz[0]))
-                        c_max = int(np.max(nz[1]))
+                        matching_objs = [obj for obj in objects if obj["color"] == c_val]
+                        for obj in matching_objs:
+                            cropped_inp, metadata = SpatialAttentionTool.crop_attention_window(inp, tuple(obj["bbox"]))
 
-                        # Crop to bounding box before applying sub-sequence
-                        layer_current = layer_input[r_min:r_max+1, c_min:c_max+1].copy()
-                        for sub_name, sub_params in sub_seq:
-                            func = self.primitive_map.get(sub_name)
-                            if func:
-                                layer_current = func(layer_current, **sub_params)
+                            layer_current = cropped_inp.copy()
+                            for sub_name, sub_params in sub_seq:
+                                func = self.primitive_map.get(sub_name)
+                                if func:
+                                    layer_current = func(layer_current, **sub_params)
 
-                        placed_layer = np.zeros_like(inp)
-                        ph, pw = layer_current.shape
-                        r_end = min(r_min + ph, inp.shape[0])
-                        c_end = min(c_min + pw, inp.shape[1])
-                        ph_trunc = r_end - r_min
-                        pw_trunc = c_end - c_min
-                        if ph_trunc > 0 and pw_trunc > 0:
-                            placed_layer[r_min:r_end, c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
-                        layers.append(placed_layer)
+                            placed_layer = SpatialAttentionTool.overlay_attention_window(
+                                canvas=np.zeros_like(inp),
+                                cropped_grid=layer_current,
+                                metadata=metadata,
+                                blend_mode="alpha_composite"
+                            )
+                            layers.append(placed_layer)
 
                     if not layers:
                         continue
@@ -610,30 +604,38 @@ def ladder_blend(grid):
     colors = [{', '.join(colors_code)}]
     static_colors = {static_set_str}
 
+    from scipy.ndimage import label, find_objects
     layers = []
     for f, c_val in zip(funcs, colors):
-        # Dynamically find bounding box of isolated color
         isolated_mask = (grid == c_val)
         if not np.any(isolated_mask):
             continue
-        nz = np.nonzero(isolated_mask)
-        r_min, c_min = int(np.min(nz[0])), int(np.min(nz[1]))
-        r_max, c_max = int(np.max(nz[0])), int(np.max(nz[1]))
 
-        layer_input = np.where(isolated_mask, grid, 0).astype(np.int8)
-        # Crop to bounding box before applying sub-sequence
-        cropped_input = layer_input[r_min:r_max+1, c_min:c_max+1]
-        layer_current = f(cropped_input)
+        labeled, num = label(isolated_mask, structure=np.array([[0, 1, 0], [1, 1, 1], [0, 1, 0]]))
+        slices = find_objects(labeled)
 
-        placed_layer = np.zeros_like(grid)
-        ph, pw = layer_current.shape
-        r_end = min(r_min + ph, grid.shape[0])
-        c_end = min(c_min + pw, grid.shape[1])
-        ph_trunc = r_end - r_min
-        pw_trunc = c_end - c_min
-        if ph_trunc > 0 and pw_trunc > 0:
-            placed_layer[r_min:r_end, c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
-        layers.append(placed_layer)
+        for i, slc in enumerate(slices, start=1):
+            if slc is None: continue
+            r_min, r_max = slc[0].start, slc[0].stop - 1
+            c_min, c_max = slc[1].start, slc[1].stop - 1
+
+            # Crop to bounding box
+            cropped_input = grid[r_min:r_max+1, c_min:c_max+1].copy()
+            # Mask out other colors/objects in the bbox just in case
+            obj_mask = (labeled[slc] == i)
+            cropped_input[~obj_mask] = 0
+
+            layer_current = f(cropped_input)
+
+            placed_layer = np.zeros_like(grid)
+            ph, pw = layer_current.shape
+            r_end = min(r_min + ph, grid.shape[0])
+            c_end = min(c_min + pw, grid.shape[1])
+            ph_trunc = r_end - r_min
+            pw_trunc = c_end - c_min
+            if ph_trunc > 0 and pw_trunc > 0:
+                placed_layer[r_min:r_end, c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
+            layers.append(placed_layer)
 
     if not layers: return grid.copy()
 

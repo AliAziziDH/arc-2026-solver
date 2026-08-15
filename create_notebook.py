@@ -388,7 +388,7 @@ def get_object_metadata(grid: np.ndarray, bg: int = 0) -> List[Dict]:
 # Section 1: core/grid.py properly applies raster-scan permutation avoiding static colors.
 
 
-'''
+\n'''
 
 SANDBOX_CODE = '''import numpy as np
 import multiprocessing as mp

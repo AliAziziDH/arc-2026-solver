@@ -2,14 +2,15 @@ import numpy as np
 from core.grid import canonicalize_grid
 
 class StateMemo:
-    def __init__(self, max_size: int = 200_000, static_colors: set = None):
+    def __init__(self, max_size: int = 200_000, static_colors: set = None, all_grids: list = None):
         self.max_size = max_size
         self.memo = {}
         self.static_colors = static_colors
+        self.all_grids = all_grids
 
     def try_enter(self, grid, depth):
         # Apply color normalization for equivariance and geometric canonicalization, preserving semantic static landmarks
-        canon_grid, _ = canonicalize_grid(grid, static_colors=self.static_colors)
+        canon_grid, _ = canonicalize_grid(grid, static_colors=self.static_colors, all_grids=self.all_grids)
 
         # Ensure grid is a numpy array with exact byte-level canonicalization
         canon_grid = np.asarray(canon_grid, dtype=np.int8, order='C')

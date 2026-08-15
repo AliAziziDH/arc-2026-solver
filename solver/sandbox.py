@@ -1,144 +1,237 @@
-import multiprocessing as mp
+import subprocess
 import numpy as np
 import traceback
 import os
 import signal
 import gc
+import json
+import sys
+import tempfile
+import time
 
 class IPyBoxSandbox:
-    def __init__(self, target, args, timeout):
-        self.target = target
-        self.args = args
+    def __init__(self, target_script_content, timeout):
+        self.target_script_content = target_script_content
         self.timeout = timeout
         self.process = None
-        self.queue = None
-        self.ctx = None
 
     def __enter__(self):
-        try:
-            self.ctx = mp.get_context('fork')
-        except ValueError:
-            self.ctx = mp.get_context('spawn')
+        # Write the executable python script to a temp file
+        self.temp_file = tempfile.NamedTemporaryFile(mode='w', suffix='.py', delete=False)
+        self.temp_file.write(self.target_script_content)
+        self.temp_file.close()
 
-        self.queue = self.ctx.Queue()
+        self.out_file = tempfile.NamedTemporaryFile(mode='r', suffix='.json', delete=False)
+        self.out_file.close()
 
-        def run_with_setpgrp(*args):
-            os.setsid()
-            print(f"[Sandbox Governance] Created isolated process group PGID: {os.getpgrp()} via os.setsid().")
-            self.target(*args)
+        # Run via subprocess in isolated process group
+        cmd = [sys.executable, self.temp_file.name, self.out_file.name]
 
-        args_with_q = list(self.args) + [self.queue]
-        self.process = self.ctx.Process(target=run_with_setpgrp, args=args_with_q)
-        self.process.start()
+        self.process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            preexec_fn=os.setsid
+        )
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        if self.process and self.process.is_alive():
+        if self.process and self.process.poll() is None:
             try:
                 child_pgid = os.getpgid(self.process.pid)
                 if child_pgid != os.getpgrp():
                     print(f"[Sandbox Governance] Terminating process group PGID: {child_pgid} with signal SIGKILL.")
                     os.killpg(child_pgid, signal.SIGKILL)
+                else:
+                    self.process.kill()
             except ProcessLookupError:
                 pass
-            self.process.join(timeout=0.1)
 
-        if self.queue:
-            self.queue.close()
-            self.queue.join_thread()
-            self.queue = None
+            try:
+                self.process.wait(timeout=0.1)
+            except subprocess.TimeoutExpired:
+                pass
 
         if self.process:
-            self.process.close()
+            if self.process.stdout:
+                self.process.stdout.close()
+            if self.process.stderr:
+                self.process.stderr.close()
             self.process = None
 
-        self.ctx = None
+        try:
+            os.remove(self.temp_file.name)
+            os.remove(self.out_file.name)
+        except OSError:
+            pass
 
         print("[Sandbox Governance] gc.collect() executed post-execution.")
         gc.collect()
 
-def _run_with_feedback_worker(code_str, train_pairs, dsl_context, q):
+def _serialize_train_pairs(train_pairs):
+    return [[inp.tolist(), out.tolist()] for inp, out in train_pairs]
+
+def IPyBoxSandbox_run(code_str: str, train_pairs: list, dsl_context: dict, timeout_secs: float = 2.0) -> dict:
+    pairs_json = json.dumps(_serialize_train_pairs(train_pairs))
+
+    script = f"""
+import sys
+import json
+import numpy as np
+import traceback
+
+# Import primitives dynamically
+sys.path.insert(0, '{os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))}')
+import core.primitives as primitives
+
+dsl_context = {{
+    name: getattr(primitives, name)
+    for name in [
+        'rotate_90', 'flip_h', 'flip_v', 'transpose', 'crop_bbox', 'scale',
+        'replace_color', 'keep_only_color', 'remove_color', 'extract_largest',
+        'extract_smallest', 'gravity_down', 'fill_holes', 'tile_to_size', 'pad_to_size',
+        'crop_then_gravity', 'extract_largest_and_center', 'remove_small_noise', 'symmetrize_hv', 'scale_to_output'
+    ] if hasattr(primitives, name)
+}}
+
+def run():
     try:
+        pairs = json.loads('''{pairs_json}''')
+        train_pairs = [(np.array(p[0], dtype=np.int8), np.array(p[1], dtype=np.int8)) for p in pairs]
+
         success = True
         mismatches = []
 
+        code_str = '''{code_str.replace("'''", "\\'\\'\\'")}'''
+
         for inp_t, out_t in train_pairs:
-            loc = {
+            loc = {{
                 **dsl_context,
                 'solve': None,
                 'input_grid': inp_t.copy()
-            }
+            }}
             exec(code_str, loc)
             solve_func = loc.get('solve')
             if solve_func is None:
-                q.put(({"success": False, "error": "Failed to find solve function", "mismatches": []}, None))
-                return
+                return {{"success": False, "error": "Failed to find solve function", "mismatches": []}}
 
             output_grid = solve_func()
 
             if not isinstance(output_grid, np.ndarray):
-                q.put(({"success": False, "error": "Output is not a numpy array", "mismatches": []}, None))
-                return
+                return {{"success": False, "error": "Output is not a numpy array", "mismatches": []}}
 
             output_grid = np.clip(output_grid, 0, 9).astype(np.int8)
             output_grid = np.ascontiguousarray(output_grid)
 
             if not np.array_equal(output_grid, out_t):
                 success = False
-                mismatches.append({
+                mismatches.append({{
                     "pred_shape": output_grid.shape,
                     "target_shape": out_t.shape,
                     "pred_sample": output_grid.tolist()[:3],
                     "target_sample": out_t.tolist()[:3]
-                })
+                }})
 
-        q.put(({"success": success, "error": None, "mismatches": mismatches}, None))
+        return {{"success": success, "error": None, "mismatches": mismatches}}
 
     except Exception as e:
-        q.put(({"success": False, "error": traceback.format_exc(), "mismatches": []}, None))
+        return {{"success": False, "error": traceback.format_exc(), "mismatches": []}}
 
-def IPyBoxSandbox_run(code_str: str, train_pairs: list, dsl_context: dict, timeout_secs: float = 2.0) -> dict:
-    with IPyBoxSandbox(_run_with_feedback_worker, (code_str, train_pairs, dsl_context), timeout_secs) as box:
-        box.process.join(timeout=timeout_secs)
+if __name__ == '__main__':
+    res = run()
+    with open(sys.argv[1], 'w') as f:
+        json.dump(res, f)
+"""
 
-        if box.process.is_alive():
+    with IPyBoxSandbox(script, timeout_secs) as box:
+        try:
+            box.process.wait(timeout=timeout_secs)
+        except subprocess.TimeoutExpired:
             return {"success": False, "error": "Timeout exceeded", "mismatches": []}
 
-        if box.queue.empty():
+        try:
+            with open(box.out_file.name, 'r') as f:
+                res = json.load(f)
+            return res
+        except (json.JSONDecodeError, FileNotFoundError):
             return {"success": False, "error": "No output returned", "mismatches": []}
 
-        res, _ = box.queue.get()
-        return res
-
-def _worker_single(c_str, i_grid, d_ctx, qu):
-    try:
-        loc = {**d_ctx, 'solve': None, 'input_grid': i_grid}
-        exec(c_str, loc)
-        solve_func = loc['solve']
-        if solve_func is None:
-            qu.put((None, "Failed to find solve function"))
-            return
-        out_grid = solve_func()
-        if not isinstance(out_grid, np.ndarray):
-            qu.put((None, "Output is not a numpy array"))
-            return
-        out_grid = np.clip(out_grid, 0, 9).astype(np.int8)
-        out_grid = np.ascontiguousarray(out_grid)
-        qu.put((out_grid, None))
-    except NameError as e:
-        qu.put((None, f"NameError: {str(e)} - Missing primitive or variable"))
-    except Exception as e:
-        qu.put((None, str(e)))
-
 def safe_execute_solve(code_str: str, input_grid: np.ndarray, dsl_context: dict, timeout_secs: int = 5):
-    with IPyBoxSandbox(_worker_single, (code_str, input_grid, dsl_context), timeout_secs) as box:
-        box.process.join(timeout=timeout_secs)
+    grid_json = json.dumps(input_grid.tolist())
 
-        if box.process.is_alive():
+    script = f"""
+import sys
+import json
+import numpy as np
+import traceback
+
+sys.path.insert(0, '{os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))}')
+import core.primitives as primitives
+
+dsl_context = {{
+    name: getattr(primitives, name)
+    for name in [
+        'rotate_90', 'flip_h', 'flip_v', 'transpose', 'crop_bbox', 'scale',
+        'replace_color', 'keep_only_color', 'remove_color', 'extract_largest',
+        'extract_smallest', 'gravity_down', 'fill_holes', 'tile_to_size', 'pad_to_size',
+        'crop_then_gravity', 'extract_largest_and_center', 'remove_small_noise', 'symmetrize_hv', 'scale_to_output'
+    ] if hasattr(primitives, name)
+}}
+
+def run():
+    try:
+        grid_data = json.loads('''{grid_json}''')
+        input_grid = np.array(grid_data, dtype=np.int8)
+
+        code_str = '''{code_str.replace("'''", "\\'\\'\\'")}'''
+
+        loc = {{
+            **dsl_context,
+            'solve': None,
+            'input_grid': input_grid
+        }}
+
+        exec(code_str, loc)
+        solve_func = loc.get('solve')
+
+        if solve_func is None:
+            return None, "Failed to find solve function"
+
+        output_grid = solve_func()
+
+        if not isinstance(output_grid, np.ndarray):
+            return None, "Output is not a numpy array"
+
+        output_grid = np.clip(output_grid, 0, 9).astype(np.int8)
+        output_grid = np.ascontiguousarray(output_grid)
+
+        return output_grid.tolist(), None
+
+    except NameError as e:
+        return None, f"NameError: {{str(e)}} - Missing primitive or variable"
+    except Exception as e:
+        return None, traceback.format_exc()
+
+if __name__ == '__main__':
+    res, err = run()
+    with open(sys.argv[1], 'w') as f:
+        json.dump({{"res": res, "err": err}}, f)
+"""
+
+    with IPyBoxSandbox(script, timeout_secs) as box:
+        try:
+            box.process.wait(timeout=timeout_secs)
+        except subprocess.TimeoutExpired:
             return None, "Timeout exceeded"
 
-        if box.queue.empty():
-            return None, "No output returned"
+        try:
+            with open(box.out_file.name, 'r') as f:
+                out = json.load(f)
 
-        res, err = box.queue.get()
-        return res, err
+            res = out.get('res')
+            if res is not None:
+                res = np.array(res, dtype=np.int8)
+            return res, out.get('err')
+
+        except (json.JSONDecodeError, FileNotFoundError):
+            return None, "No output returned"

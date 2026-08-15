@@ -124,13 +124,30 @@ class LLMSurgicalLifeline:
         traceback_info = f"{diff_str}\n\nTrain Pair 0 Predicted Object Metadata:\n{obj_meta_str}"
 
         system_prompt = """### [SYSTEM INSTRUCTIONS]
-You are the Active Coding Lifeline agent in AuroraGate v3.5.
+You are the Active Coding Lifeline agent in AuroraGate v3.6.
 Your goal is to write a Python 3 function `def solve(grid: List[List[int]]) -> List[List[int]]:`
 that solves the given ARC puzzle.
 
 [CONSTRAINTS]
-- You must ONLY use the approved 15 primitives in `core/primitives.py` (e.g. crop_bbox, rotate_90, fill_holes).
+- You must ONLY use the approved primitives defined below.
 - Your output must be a valid python function wrapped in ```python ... ```.
+
+[APPROVED PRIMITIVES]
+def rotate_90(grid: np.ndarray) -> np.ndarray
+def flip_h(grid: np.ndarray) -> np.ndarray
+def flip_v(grid: np.ndarray) -> np.ndarray
+def transpose(grid: np.ndarray) -> np.ndarray
+def crop_bbox(grid: np.ndarray, bg: int) -> np.ndarray
+def scale(grid: np.ndarray, factor: int) -> np.ndarray
+def replace_color(grid: np.ndarray, old: int, new: int) -> np.ndarray
+def keep_only_color(grid: np.ndarray, color: int, bg: int) -> np.ndarray
+def remove_color(grid: np.ndarray, color: int, bg: int) -> np.ndarray
+def extract_largest(grid: np.ndarray, bg: int) -> np.ndarray
+def extract_smallest(grid: np.ndarray, bg: int) -> np.ndarray
+def gravity_down(grid: np.ndarray, bg: int) -> np.ndarray
+def fill_holes(grid: np.ndarray, bg: int) -> np.ndarray
+def tile_to_size(grid: np.ndarray, target_h: int, target_w: int) -> np.ndarray
+def pad_to_size(grid: np.ndarray, target_h: int, target_w: int, bg: int) -> np.ndarray
 """
 
         user_prompt = f"""### [WORKSPACE STATE]
@@ -169,7 +186,13 @@ The last compilation attempt failed. Here is the feedback from our stateful REPL
 
             if token_count > 6000:
                 print(f"[LADDER Eviction] Context exceeds 6000 tokens ({token_count}). Evicting Turn N-2 and older.")
-                return messages_list[:locked_messages_count] + messages_list[-2:]
+                # Pinned Message rule: strictly lock and preserve System Prompt and initial task description
+                # which are in the first locked_messages_count messages.
+                # Only keep the most recent user error prompt and assistant response.
+                recent_messages = messages_list[locked_messages_count:]
+                if len(recent_messages) > 2:
+                    recent_messages = recent_messages[-2:]
+                return messages_list[:locked_messages_count] + recent_messages
             return messages_list
 
         for attempt in range(max_retries):

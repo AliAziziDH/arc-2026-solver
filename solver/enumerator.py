@@ -285,7 +285,8 @@ class DSLEnumerator:
         first_input, first_output = train_pairs[0]
 
         static_colors = find_static_landmarks(train_pairs, test_inputs=test_inputs)
-        memo = StateMemo(static_colors=static_colors)
+        all_task_grids = [p[0] for p in train_pairs] + [p[1] for p in train_pairs] + (test_inputs if test_inputs else [])
+        memo = StateMemo(static_colors=static_colors, all_grids=all_task_grids)
 
         initial_node = ProgramNode(
             sequence=[],
@@ -526,6 +527,17 @@ class DSLEnumerator:
                                 if func:
                                     layer_current = func(layer_current, **sub_params)
 
+                            # Implement Decomposition Offset Tracking multiplier
+                            orig_h = metadata["crop_shape"][0]
+                            orig_w = metadata["crop_shape"][1]
+                            new_h, new_w = layer_current.shape
+
+                            scale_r = new_h / orig_h if orig_h > 0 else 1.0
+                            scale_c = new_w / orig_w if orig_w > 0 else 1.0
+
+                            metadata["start_row"] = int(metadata["start_row"] * scale_r)
+                            metadata["start_col"] = int(metadata["start_col"] * scale_c)
+
                             placed_layer = SpatialAttentionTool.overlay_attention_window(
                                 canvas=np.zeros_like(inp),
                                 cropped_grid=layer_current,
@@ -629,12 +641,20 @@ def ladder_blend(grid):
 
             placed_layer = np.zeros_like(grid)
             ph, pw = layer_current.shape
-            r_end = min(r_min + ph, grid.shape[0])
-            c_end = min(c_min + pw, grid.shape[1])
-            ph_trunc = r_end - r_min
-            pw_trunc = c_end - c_min
+
+            # Multiplier for offset mapping when scaling
+            scale_r = ph / (r_max - r_min + 1) if (r_max - r_min + 1) > 0 else 1.0
+            scale_c = pw / (c_max - c_min + 1) if (c_max - c_min + 1) > 0 else 1.0
+
+            mapped_r_min = int(r_min * scale_r)
+            mapped_c_min = int(c_min * scale_c)
+
+            r_end = min(mapped_r_min + ph, grid.shape[0])
+            c_end = min(mapped_c_min + pw, grid.shape[1])
+            ph_trunc = r_end - mapped_r_min
+            pw_trunc = c_end - mapped_c_min
             if ph_trunc > 0 and pw_trunc > 0:
-                placed_layer[r_min:r_end, c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
+                placed_layer[mapped_r_min:r_end, mapped_c_min:c_end] = layer_current[:ph_trunc, :pw_trunc]
             layers.append(placed_layer)
 
     if not layers: return grid.copy()

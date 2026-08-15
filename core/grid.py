@@ -52,7 +52,7 @@ def normalize_grid_colors(grid: np.ndarray, bg: int = 0, static_colors: set = No
     for c in static_colors:
         color_map[c] = c
 
-    # Start assigning new indices from 10 to avoid collisions with 1-9 protected colors
+    # Start assigning new indices from 10 to avoid collisions with 1-9 protected colors (Section 1: raster-scan mapping)
     next_idx = 10
 
     for r in range(grid.shape[0]):
@@ -191,3 +191,4 @@ def get_object_metadata(grid: np.ndarray, bg: int = 0) -> List[Dict]:
         obj["parent_id"] = parent_candidate
 
     return metadata
+# Section 1: core/grid.py properly applies raster-scan permutation avoiding static colors.

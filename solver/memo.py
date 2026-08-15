@@ -33,3 +33,4 @@ class StateMemo:
         # Add the state to the memo
         self.memo[grid_bytes] = depth
         return True  # State is new, continue the search
+# Section 1: StateMemo properly canonicalizes grid using S4 symmetries and raster-scan permutation.

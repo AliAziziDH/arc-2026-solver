@@ -192,25 +192,20 @@ class DSLEnumerator:
     def _select_best_sequence(self, valid_sequences: List[List[Tuple[str, Dict]]], train_pairs: List[Tuple[np.ndarray, np.ndarray]]) -> List[Tuple[str, Dict]]:
         if not valid_sequences:
             return []
-        
-        if len(train_pairs) >= 3:
-            best_seq = valid_sequences[0]
-            best_cv_score = -1
-            best_length = float('inf')
 
-            for seq in valid_sequences:
-                cv_matches = 0
-                for i in range(len(train_pairs)):
-                    loo_train = train_pairs[:i] + train_pairs[i+1:]
-                    if self._verify_on_all(seq, loo_train):
-                        cv_matches += 1
-                
-                seq_len = len(seq)
-                if cv_matches > best_cv_score or (cv_matches == best_cv_score and seq_len < best_length):
-                    best_cv_score = cv_matches
-                    best_length = seq_len
-                    best_seq = seq
-            return best_seq
+        # MDL Tie-Breaking Strategy
+        def calc_mdl(seq):
+            score = 0.0
+            for name, params in seq:
+                # Composite Macros
+                if name in ['crop_then_gravity', 'extract_largest_and_center', 'remove_small_noise', 'symmetrize_hv', 'scale_to_output', 'ladder_recompose']:
+                    score += 2.5
+                else:
+                    score += 1.0
+            return score
+
+        valid_sequences.sort(key=lambda s: (calc_mdl(s), len(s)))
+        return valid_sequences[0]
         else:
             return min(valid_sequences, key=len)
 
@@ -352,6 +347,10 @@ class DSLEnumerator:
                 fixed_seq = self._verify_and_harmonize(best_node.sequence, train_pairs)
                 if fixed_seq is not None:
                     valid_sequences.append(fixed_seq)
+
+            # Depth-Gated Termination
+            if valid_sequences:
+                break
 
         if valid_sequences:
             return self._select_best_sequence(valid_sequences, train_pairs)

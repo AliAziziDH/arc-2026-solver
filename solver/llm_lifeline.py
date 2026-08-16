@@ -248,15 +248,42 @@ The last compilation attempt failed. Here is the feedback from our stateful REPL
                             candidate_scripts.append(code_str)
 
                         # Capture full traceback and mismatches to populate {traceback_info}
-                        tb_info = "The code did not pass all train pairs.\n"
+                        tb_info = "The code did not pass all train pairs.
+"
                         if error_msg:
-                            tb_info += f"Execution Error & Traceback:\n{error_msg}\n"
+                            tb_info += f"Execution Error & Traceback:
+{error_msg}
+"
                         if mismatches:
                             first_mismatch = mismatches[0]
-                            tb_info += f"Mismatch on a train pair:\n"
-                            tb_info += f"Predicted Shape: {first_mismatch['pred_shape']}, Target Shape: {first_mismatch['target_shape']}\n"
-                            tb_info += f"Predicted Sample (top 3 rows): {first_mismatch['pred_sample']}\n"
-                            tb_info += f"Target Sample (top 3 rows): {first_mismatch['target_sample']}\n"
+                            tb_info += f"Mismatch on a train pair:
+"
+
+                            pred_shape = first_mismatch['pred_shape']
+                            target_shape = first_mismatch['target_shape']
+
+                            if pred_shape != target_shape:
+                                tb_info += f"Shape Mismatch: Expected {target_shape}, Actual {pred_shape}
+"
+                            else:
+                                tb_info += f"Shape is correct: {target_shape}
+"
+
+                            diff_coords = first_mismatch.get('diff_coords', [])
+                            if diff_coords:
+                                tb_info += "Top-Left Aligned Visual Diff (First 20 mismatched cells):
+"
+                                for diff in diff_coords:
+                                    r, c, exp, act = diff['row'], diff['col'], diff['expected'], diff['actual']
+                                    act_str = act if act != -1 else "Out of Bounds"
+                                    exp_str = exp if exp != -1 else "Out of Bounds"
+                                    tb_info += f"  - At index (row={r}, col={c}): Expected color {exp_str}, but got color {act_str}
+"
+
+                            tb_info += f"Predicted Sample (top 3 rows): {first_mismatch['pred_sample']}
+"
+                            tb_info += f"Target Sample (top 3 rows): {first_mismatch['target_sample']}
+"
 
                         traceback_info = tb_info
                         feedback_prompt = f"""### [WORKSPACE STATE]

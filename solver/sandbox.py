@@ -125,11 +125,33 @@ def run():
 
             if not np.array_equal(output_grid, out_t):
                 success = False
+
+                # Visual Diff Calculation
+                max_r = max(output_grid.shape[0], out_t.shape[0])
+                max_c = max(output_grid.shape[1], out_t.shape[1])
+
+                canvas_pred = np.full((max_r, max_c), -1, dtype=np.int8)
+                canvas_target = np.full((max_r, max_c), -1, dtype=np.int8)
+
+                canvas_pred[:output_grid.shape[0], :output_grid.shape[1]] = output_grid
+                canvas_target[:out_t.shape[0], :out_t.shape[1]] = out_t
+
+                diff_coords = []
+                for r in range(max_r):
+                    for c in range(max_c):
+                        if canvas_pred[r, c] != canvas_target[r, c]:
+                            diff_coords.append({{"row": r, "col": c, "expected": int(canvas_target[r, c]), "actual": int(canvas_pred[r, c])}})
+                            if len(diff_coords) >= 20:
+                                break
+                    if len(diff_coords) >= 20:
+                        break
+
                 mismatches.append({{
                     "pred_shape": output_grid.shape,
                     "target_shape": out_t.shape,
                     "pred_sample": output_grid.tolist()[:3],
-                    "target_sample": out_t.tolist()[:3]
+                    "target_sample": out_t.tolist()[:3],
+                    "diff_coords": diff_coords
                 }})
 
         return {{"success": success, "error": None, "mismatches": mismatches}}

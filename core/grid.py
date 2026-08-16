@@ -33,12 +33,12 @@ def find_static_landmarks(train_pairs: List[Tuple[np.ndarray, np.ndarray]], test
 
     return static_colors
 
-def normalize_grid_colors(grid: np.ndarray, bg: int = 0, static_colors: set = None) -> Tuple[np.ndarray, Dict[int, int]]:
+def normalize_grid_colors(grid: np.ndarray, bg: int = 0, static_colors: set = None, all_grids: List[np.ndarray] = None) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Enforces Color Permutation Equivariance under the Pi_k group.
 
-    Maps active non-zero colors of a 2D numpy grid sequentially based on
-    their raster-scan order (top-left to bottom-right), while strictly preserving
+    Maps active non-zero colors sequentially based on a joint scan of all grids in the task
+    (train and test) to ensure mathematical invariance, while strictly preserving
     colors in `static_colors`. Background (0) remains unchanged.
     Returns the normalized grid and the generated color mapping.
     """
@@ -52,15 +52,22 @@ def normalize_grid_colors(grid: np.ndarray, bg: int = 0, static_colors: set = No
     for c in static_colors:
         color_map[c] = c
 
-    # Start assigning new indices from 10 to avoid collisions with 1-9 protected colors (Section 1: raster-scan mapping)
     next_idx = 10
 
+    # Build the mapping scanning all grids first to guarantee invariance
+    grids_to_scan = all_grids if all_grids is not None else [grid]
+    for g in grids_to_scan:
+        for r in range(g.shape[0]):
+            for c in range(g.shape[1]):
+                val = g[r, c]
+                if val not in color_map:
+                    color_map[val] = next_idx
+                    next_idx += 1
+
+    # Apply the mapping to the target grid
     for r in range(grid.shape[0]):
         for c in range(grid.shape[1]):
             val = grid[r, c]
-            if val not in color_map:
-                color_map[val] = next_idx
-                next_idx += 1
             normalized[r, c] = color_map[val]
 
     return normalized, color_map
@@ -79,7 +86,7 @@ def get_dihedral_symmetries(grid: np.ndarray) -> List[np.ndarray]:
     return symmetries
 
 
-def canonicalize_grid(grid: np.ndarray, bg: int = 0, static_colors: set = None) -> Tuple[np.ndarray, Dict[int, int]]:
+def canonicalize_grid(grid: np.ndarray, bg: int = 0, static_colors: set = None, all_grids: List[np.ndarray] = None) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Returns the absolute lexicographically smallest signature of a grid
     under both color permutation (Pi_k) and geometric dihedral symmetry (S4).
@@ -89,7 +96,7 @@ def canonicalize_grid(grid: np.ndarray, bg: int = 0, static_colors: set = None) 
     Also returns the color map for Socratic REPL context.
     """
     # 1. Enforce color permutation equivariance first (preserving semantic static colors)
-    color_normalized, color_map = normalize_grid_colors(grid, bg=bg, static_colors=static_colors)
+    color_normalized, color_map = normalize_grid_colors(grid, bg=bg, static_colors=static_colors, all_grids=all_grids)
 
     # 2. Enforce dihedral symmetry S4 minimization
     symmetries = get_dihedral_symmetries(color_normalized)

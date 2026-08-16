@@ -273,7 +273,7 @@ def get_dihedral_symmetries(grid: np.ndarray) -> List[np.ndarray]:
     return symmetries
 
 
-def canonicalize_grid(grid: np.ndarray, bg: int = 0, static_colors: set = None) -> Tuple[np.ndarray, Dict[int, int]]:
+def canonicalize_grid(grid: np.ndarray, bg: int = 0, static_colors: set = None, all_grids: List[np.ndarray] = None) -> Tuple[np.ndarray, Dict[int, int]]:
     """
     Returns the absolute lexicographically smallest signature of a grid
     under both color permutation (Pi_k) and geometric dihedral symmetry (S4).
@@ -283,7 +283,7 @@ def canonicalize_grid(grid: np.ndarray, bg: int = 0, static_colors: set = None) 
     Also returns the color map for Socratic REPL context.
     """
     # 1. Enforce color permutation equivariance first (preserving semantic static colors)
-    color_normalized, color_map = normalize_grid_colors(grid, bg=bg, static_colors=static_colors)
+    color_normalized, color_map = normalize_grid_colors(grid, bg=bg, static_colors=static_colors, all_grids=all_grids)
 
     # 2. Enforce dihedral symmetry S4 minimization
     symmetries = get_dihedral_symmetries(color_normalized)
@@ -387,14 +387,15 @@ def get_object_metadata(grid: np.ndarray, bg: int = 0) -> List[Dict]:
     return metadata
 
 class StateMemo:
-    def __init__(self, max_size: int = 200_000, static_colors: set = None):
+    def __init__(self, max_size: int = 200_000, static_colors: set = None, all_grids: list = None):
         self.max_size = max_size
         self.memo = {}
         self.static_colors = static_colors
+        self.all_grids = all_grids
 
     def try_enter(self, grid, depth):
         # Apply color normalization for equivariance and geometric canonicalization, preserving semantic static landmarks
-        canon_grid, _ = canonicalize_grid(grid, static_colors=self.static_colors)
+        canon_grid, _ = canonicalize_grid(grid, static_colors=self.static_colors, all_grids=self.all_grids)
 
         # Ensure grid is a numpy array with exact byte-level canonicalization
         canon_grid = np.asarray(canon_grid, dtype=np.int8, order='C')
@@ -421,14 +422,15 @@ class StateMemo:
 # Section 1: StateMemo properly canonicalizes grid using S4 symmetries and raster-scan permutation.
 
 class StateMemo:
-    def __init__(self, max_size: int = 200_000, static_colors: set = None):
+    def __init__(self, max_size: int = 200_000, static_colors: set = None, all_grids: list = None):
         self.max_size = max_size
         self.memo = {}
         self.static_colors = static_colors
+        self.all_grids = all_grids
 
     def try_enter(self, grid, depth):
         # Apply color normalization for equivariance and geometric canonicalization, preserving semantic static landmarks
-        canon_grid, _ = canonicalize_grid(grid, static_colors=self.static_colors)
+        canon_grid, _ = canonicalize_grid(grid, static_colors=self.static_colors, all_grids=self.all_grids)
 
         # Ensure grid is a numpy array with exact byte-level canonicalization
         canon_grid = np.asarray(canon_grid, dtype=np.int8, order='C')

@@ -349,6 +349,16 @@ in the exact Kaggle format.
 - `output_id`: `{task_id}_{test_index}` (e.g. `007bbfb7_0`)
 - `output`: JSON-serialized grid (e.g. `[[0, 1], [1, 0]]`)
 """),
+        make_markdown("""## 0. Dynamic Path Resolution & Environment Setup"""),
+        make_cell("""import os
+import sys
+
+# Dynamically locate and prepend our mounted codebase to sys.path
+for root, dirs, files in os.walk('/kaggle/input'):
+    if 'core' in dirs and 'solver' in dirs:
+        if root not in sys.path:
+            sys.path.insert(0, root)
+        break"""),
         make_markdown("""## 1. Install Dependencies"""),
         make_cell("""# Install required packages
 !pip install -q numpy scipy"""),

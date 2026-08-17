@@ -1,6 +1,6 @@
 {
-  "id": "aliazizi1/arc-2026-solver-v3-6",
-  "title": "arc-2026-solver-v3-6",
+  "id": "aliazizi1/arc-agi-2-auroragate-solver-notebook",
+  "title": "AuroraGate Phase 2 High Precision Ensemble",
   "code_file": "auroragate-phase-2-high-precision-ensemble.ipynb",
   "language": "python",
   "kernel_type": "notebook",
@@ -8,9 +8,10 @@
   "enable_gpu": true,
   "enable_internet": false,
   "model_sources": [
-    "qwen/qwen2.5-coder/transformers/7b-instruct/1"
+    "aliazizi1/arc-agi-2-auroragate-solver/pytorch/v3.6.1-stable"
   ],
   "competition_sources": [
     "arc-prize-2026-arc-agi-2"
-  ]
+  ],
+  "dataset_sources": []
 }

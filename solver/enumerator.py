@@ -206,8 +206,6 @@ class DSLEnumerator:
 
         valid_sequences.sort(key=lambda s: (calc_mdl(s), len(s)))
         return valid_sequences[0]
-        else:
-            return min(valid_sequences, key=len)
 
     def _decompose_and_solve(self, train_pairs: List[Tuple[np.ndarray, np.ndarray]], test_inputs: List[np.ndarray] = None) -> Optional[List[Tuple[str, Dict]]]:
         first_input, first_output = train_pairs[0]

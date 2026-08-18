@@ -350,15 +350,7 @@ in the exact Kaggle format.
 - `output`: JSON-serialized grid (e.g. `[[0, 1], [1, 0]]`)
 """),
         make_markdown("""## 0. Dynamic Path Resolution & Environment Setup"""),
-        make_cell("""import os
-import sys
-
-# Dynamically locate and prepend our mounted codebase to sys.path
-for root, dirs, files in os.walk('/kaggle/input'):
-    if 'core' in dirs and 'solver' in dirs:
-        if root not in sys.path:
-            sys.path.insert(0, root)
-        break"""),
+        make_cell("""import sys\nimport os\n\n# Prepend current directory and Kaggle input directories to sys.path\npaths_to_add = [os.getcwd(), '/kaggle/input']\nif os.path.exists('/kaggle/input'):\n    for item in os.listdir('/kaggle/input'):\n        full_path = os.path.join('/kaggle/input', item)\n        if os.path.isdir(full_path):\n            paths_to_add.append(full_path)\n\nfor p in paths_to_add:\n    if p not in sys.path:\n        sys.path.insert(0, p)\n\nprint("Dynamic path resolution completed. sys.path:", sys.path)"""),
         make_markdown("""## 1. Install Dependencies"""),
         make_cell("""# Install required packages
 !pip install -q numpy scipy"""),
